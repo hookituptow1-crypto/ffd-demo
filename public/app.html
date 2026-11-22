@@ -1,0 +1,17 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>FFD</title><meta name="theme-color" content="#0a0b08"><link rel="manifest" href="/manifest.webmanifest"><link rel="icon" href="/icons/icon-32.png">
+<link rel="apple-touch-icon" href="/icons/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="/css/styles.css"></head><body>
+<div class="app">
+  <div class="topbar"><img src="/icons/logo.png" alt=""><div class="brand" data-brand="short">FFD</div><div class="right row">
+    <button class="bell" id="bell" aria-label="Alerts">🔔<span class="badge hidden" id="bellN"></span></button>
+    <button class="btn sm" id="logout">Sign out</button></div></div>
+  <div id="view"></div>
+</div>
+<nav class="tabbar"><div class="in">
+  <button data-tab="status" class="on"><span class="ic">🚦</span>Status</button>
+  <button data-tab="flights"><span class="ic">✈️</span>Flights<span class="badge hidden" id="flN"></span></button>
+  <button data-tab="alerts"><span class="ic">🔔</span>Alerts<span class="badge hidden" id="alN"></span></button>
+  <button data-tab="profile"><span class="ic">👤</span>My info</button>
+</div></nav>
+<script src="/js/brand.js"></script><script src="/js/common.js"></script><script src="/js/app.js"></script></body></html>

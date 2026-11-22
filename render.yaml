@@ -1,0 +1,19 @@
+# Render Blueprint for the FFD demo. Starter instance (~$7/mo) + 1 GB persistent disk at /app/data.
+services:
+  - type: web
+    name: ffd-demo
+    runtime: docker
+    plan: starter
+    region: oregon
+    healthCheckPath: /
+    envVars:
+      - key: DEMO_MODE
+        value: "1"
+      - key: NODE_ENV
+        value: production
+      - key: DATA_KEY
+        sync: false          # entered at deploy time; 64 hex chars (openssl rand -hex 32)
+    disk:
+      name: ffd-data
+      mountPath: /app/data
+      sizeGB: 1
