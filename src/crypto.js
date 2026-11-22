@@ -6,7 +6,11 @@ const fs = require('fs');
 const path = require('path');
 
 function loadKey() {
-  if (process.env.DATA_KEY) return Buffer.from(process.env.DATA_KEY, 'hex');
+  if (process.env.DATA_KEY) {
+    const k = process.env.DATA_KEY.trim();
+    // 64 hex chars = raw key; anything else (e.g. a Render-generated secret) is hashed to 32 bytes
+    return /^[0-9a-f]{64}$/i.test(k) ? Buffer.from(k, 'hex') : crypto.createHash('sha256').update(k).digest();
+  }
   const p = path.join(__dirname, '..', 'data', 'data.key');
   if (!fs.existsSync(p)) fs.writeFileSync(p, crypto.randomBytes(32).toString('hex'), { mode: 0o600 });
   return Buffer.from(fs.readFileSync(p, 'utf8').trim(), 'hex');

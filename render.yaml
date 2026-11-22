@@ -12,7 +12,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: DATA_KEY
-        sync: false          # entered at deploy time; 64 hex chars (openssl rand -hex 32)
+        generateValue: true  # Render generates a random secret; never stored in the repo
     disk:
       name: ffd-data
       mountPath: /app/data
