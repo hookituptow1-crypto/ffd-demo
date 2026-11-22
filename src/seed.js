@@ -4,15 +4,25 @@ const db = require('./db');
 const { hashPassword, encJSON } = require('./crypto');
 const { today, fmt, addDays } = require('./status');
 
-const ADMIN = { email: 'admin@ffd.demo', password: 'FFD!Admin2026' };
-const CONTRACTOR_PW = 'Deploy!2026';
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+// Demo passwords are NOT in the source code. They come from env (ADMIN_PASSWORD / CONTRACTOR_PASSWORD, set privately on
+// the host) or, if unset, are generated once and kept server-side in data/demo-credentials.json (never served).
+function demoPasswords() {
+  if (process.env.ADMIN_PASSWORD && process.env.CONTRACTOR_PASSWORD) return { admin: process.env.ADMIN_PASSWORD, contractor: process.env.CONTRACTOR_PASSWORD };
+  const f = path.join(__dirname, '..', 'data', 'demo-credentials.json');
+  if (!fs.existsSync(f)) fs.writeFileSync(f, JSON.stringify({ admin: crypto.randomBytes(12).toString('base64url'), contractor: crypto.randomBytes(9).toString('base64url') }), { mode: 0o600 });
+  return JSON.parse(fs.readFileSync(f, 'utf8'));
+}
+const ADMIN_EMAIL = 'admin@ffd.demo';
 
 function seed() {
   const T = today();
   const d = (n) => fmt(addDays(T, n));
-  db.exec(`DELETE FROM sessions; DELETE FROM push_subs; DELETE FROM checkins; DELETE FROM admin_alerts; DELETE FROM alerts; DELETE FROM uploads; DELETE FROM flights;
+  db.exec(`DELETE FROM sessions; DELETE FROM push_subs; DELETE FROM schedule_blocks; DELETE FROM checkins; DELETE FROM admin_alerts; DELETE FROM alerts; DELETE FROM uploads; DELETE FROM flights;
     DELETE FROM blockers; DELETE FROM documents; DELETE FROM profiles; DELETE FROM users; DELETE FROM contractors;
-    DELETE FROM destination_requirements; DELETE FROM destinations; DELETE FROM requirement_types; DELETE FROM audit_log;`);
+    DELETE FROM destination_requirements; DELETE FROM destinations; DELETE FROM requirement_types;`); // audit_log is kept across resets
 
   const rt = db.prepare(`INSERT INTO requirement_types (name, category, has_expiry, min_validity_days, lead_days, instructions, keyword)
     VALUES (?,?,?,?,?,?,?)`);
@@ -45,6 +55,8 @@ function seed() {
     ['Niamey, Niger', 'Niger', 'Africa', 'NIM', 'Sahel site', [...common, 'Niger Visa', 'Yellow Fever Vaccine', 'Meningococcal ACWY']],
   ].forEach(([n, c, r, a, notes, reqs]) => {
     const id = Number(dest.run(n, c, r, a, notes).lastInsertRowid); D[n] = id;
+    const tgt = { 'Erbil, Iraq': [1, 4], 'Camp Arifjan, Kuwait': [2, null] }[n] || [0, null]; // headcount targets (min, max) — Arifjan gap, Erbil overstaffed
+    db.prepare('UPDATE destinations SET min_headcount = ?, max_headcount = ? WHERE id = ?').run(tgt[0], tgt[1], id);
     reqs.forEach((q) => dr.run(id, R[q]));
   });
 
@@ -53,8 +65,9 @@ function seed() {
   const doc = db.prepare(`INSERT INTO documents (contractor_id, requirement_type_id, ref_last4, issued, expires, status, notes) VALUES (?,?,?,?,?,'valid','')`);
   const user = db.prepare('INSERT INTO users (email, password_hash, role, contractor_id) VALUES (?,?,?,?)');
   const prof = db.prepare('INSERT INTO profiles (contractor_id, data_enc, updated_by) VALUES (?,?,?)');
-  const pwHash = hashPassword(CONTRACTOR_PW);
-  user.run(ADMIN.email, hashPassword(ADMIN.password), 'admin', null);
+  const PW = demoPasswords();
+  const pwHash = hashPassword(PW.contractor);
+  user.run(ADMIN_EMAIL, hashPassword(PW.admin), 'admin', null);
 
   // Default "far-out" expiries; per-contractor overrides below.
   const GOOD = { 'Passport': 2200, 'Iraq Work Visa': 700, 'Kuwait Work Visa': 700, 'Djibouti Entry Visa': 600, 'Niger Visa': 600,
@@ -62,17 +75,17 @@ function seed() {
     "Government ID / Driver's License": 1400, 'Medical Fitness Clearance': 300, 'Background Check': 300 };
   const people = [
     // name, emp, scenario, destination, deploy offset, {req: expiry offset | 'missing'}, override, blocker, home
-    ['Marcus Delgado', 'RT-1001', 'A · Green — cleared to deploy', 'Erbil, Iraq', 12, {}, null, null, 'IAH', 'HOU'],
-    ['Dana Whitfield', 'RT-1002', 'Yellow — background check renewal due before next rotation', 'Camp Arifjan, Kuwait', -20, { 'Background Check': 100 }, null, null, 'DFW', 'DAL'],
+    ['Marcus Delgado', 'RT-1001', 'A · Green — cleared to deploy (departs tomorrow)', 'Erbil, Iraq', 1, {}, null, null, 'IAH', 'HOU'],
+    ['Dana Whitfield', 'RT-1002', 'Yellow — background check renewal due; flying home in 2 days', 'Camp Arifjan, Kuwait', -58, { 'Background Check': 75 }, null, null, 'DFW', 'DAL'],
     ['Tyler Brandt', 'RT-1003', 'Green — Africa site, AI booking allowed', 'Camp Lemonnier, Djibouti', 35, {}, null, null, 'ATL', ''],
-    ['Cody Ramirez', 'RT-1004', 'B · Yellow — passport expires before next rotation', 'Erbil, Iraq', 10, { 'Passport': 300 }, null, null, 'MEM', 'BNA'],
-    ['Brianna Holt', 'RT-1005', 'Yellow — typhoid shot lapses before next rotation', 'Camp Arifjan, Kuwait', 5, { 'Typhoid': 120 }, null, null, 'DEN', 'COS'],
-    ['Wes Calloway', 'RT-1006', 'Yellow — annual medical lapses before next rotation', 'Erbil, Iraq', 20, { 'Medical Fitness Clearance': 130 }, null, null, 'SAT', 'AUS'],
+    ['Cody Ramirez', 'RT-1004', 'B · Yellow — passport expires before next rotation (departs in 3 days)', 'Erbil, Iraq', 3, { 'Passport': 300 }, null, null, 'MEM', 'BNA'],
+    ['Brianna Holt', 'RT-1005', 'Yellow — typhoid shot lapses before next rotation (departs today)', 'Camp Arifjan, Kuwait', 0, { 'Typhoid': 120 }, null, null, 'DEN', 'COS'],
+    ['Wes Calloway', 'RT-1006', 'Yellow — annual medical lapses; rotation in 6 days, no flight booked yet', 'Erbil, Iraq', 6, { 'Medical Fitness Clearance': 130 }, null, null, 'SAT', 'AUS'],
     ['John Doe', 'RT-1007', 'D · Red — missing yellow fever shot (live fix demo)', 'Camp Lemonnier, Djibouti', 32, { 'Yellow Fever Vaccine': 'missing' }, null, null, 'MEM', 'LIT'],
-    ['Sam Kowalski', 'RT-1008', 'C · Red — expired passport + missing Iraq visa', 'Erbil, Iraq', 15, { 'Passport': -10, 'Iraq Work Visa': 'missing' }, null, null, 'MSY', 'BTR'],
+    ['Sam Kowalski', 'RT-1008', 'C · Red — expired passport + missing Iraq visa (booked to fly in 4 days!)', 'Erbil, Iraq', 4, { 'Passport': -10, 'Iraq Work Visa': 'missing' }, null, null, 'MSY', 'BTR'],
     ['Trent Vaughn', 'RT-1009', 'Red — background check in progress + HR hold', 'Camp Arifjan, Kuwait', 25, { 'Background Check': 'in_progress' }, 'red', 'Pending background re-investigation', 'OKC', 'TUL'],
-    ['Ray Castillo', 'RT-1010', 'Green — deployed now (Erbil), checking in', 'Erbil, Iraq', -15, {}, null, null, 'ELP', 'ABQ'],
-    ['Luis Fontaine', 'RT-1011', 'Green — deployed now (Djibouti), checking in', 'Camp Lemonnier, Djibouti', -30, {}, null, null, 'JAX', 'SAV'],
+    ['Ray Castillo', 'RT-1010', 'Green — deployed now (Erbil), checking in', 'Erbil, Iraq', -25, {}, null, null, 'ELP', 'ABQ'],
+    ['Luis Fontaine', 'RT-1011', 'Green — deployed (Djibouti), flying home today', 'Camp Lemonnier, Djibouti', -60, {}, null, null, 'JAX', 'SAV'],
     ['Mike Brennan', 'RT-1012', 'Green — deployed now (Niger), check-in OVERDUE', 'Niamey, Niger', -10, {}, null, null, 'TUS', 'PHX'],
   ];
   const reqsFor = db.prepare('SELECT rt.* FROM requirement_types rt JOIN destination_requirements dr ON dr.requirement_type_id = rt.id WHERE dr.destination_id = ?');
@@ -131,20 +144,65 @@ function seed() {
       medical: { blood_type: ['O+', 'A+', 'B+', 'O-', 'A-', 'AB+', 'O+', 'B-', 'A+'][i % 9], allergies: ['Penicillin', 'None known', 'Seasonal pollen', 'Penicillin', 'Shellfish', 'None known', 'Penicillin, bee stings', 'Sulfa drugs', 'None known'][i % 9],
         conditions: ['Controlled hypertension', 'None', 'Mild seasonal allergies', 'None', 'Hypothyroidism (controlled)', 'High cholesterol', 'None', 'GERD', 'Type 2 diabetes (controlled)'][i % 9], medications: '', notes: '' },
       clearances: pp['Medical Fitness Clearance'] ? [{ type: 'Medical Fitness', level: 'Fit for deployment', granted: pp['Medical Fitness Clearance'].issued, expires: pp['Medical Fitness Clearance'].expires }] : [],
-      employment: { employer: 'FFD Demo Services LLC', position: ['Security Specialist', 'Logistics Coordinator', 'Site Medic', 'Security Specialist', 'Supply Tech', 'Electrician', 'Generator Mechanic', 'Security Specialist', 'Team Lead'][i % 9],
+      employment: { employer: 'FFD Demo Services LLC', position: ['Crew Chief', 'Inspector / QA', 'Avionics Technician', 'A&P Mechanic', 'Aircraft Maintenance Technician', 'A&P Mechanic', 'Aircraft Maintenance Technician', 'Avionics Technician', 'Supervisor', 'Lead', 'Aircraft Maintenance Technician', 'Site Manager'][i],
         employee_no: emp, supervisor: 'Ops Manager (Demo)', start_date: d(-700 - i * 90) },
     }), 'seed');
   });
   db.prepare("INSERT INTO blockers (contractor_id, description) VALUES (?, 'Background re-investigation pending — HR hold')").run(ids['Trent Vaughn']);
+  // Crew schedule: 60/30 pattern laid out from ~3 months back to ~4 months ahead, plus training and leave in OFF time.
+  const SCH = require('./schedule');
+  const hist = db.prepare('INSERT INTO schedule_blocks (contractor_id, kind, start, end, destination_id, notes) VALUES (?,?,?,?,?,?)');
+  people.forEach(([name, , , dn, off]) => {
+    // past rotations: step back 90 days per cycle; if one would still be running today the guy had an extended break instead
+    let p = off - 90; while (p + 60 >= 0) p -= 15;
+    const starts = [p - 90, p].filter((x) => x + 60 >= -100);
+    starts.forEach((st, k) => {
+      hist.run(ids[name], 'on', d(st), d(st + 60), D[dn], '');
+      const nxt = k + 1 < starts.length ? starts[k + 1] : off;
+      if (nxt - (st + 60) > 1) hist.run(ids[name], 'off', d(st + 61), d(nxt - 1), null, nxt - (st + 60) > 31 ? 'Extended break' : '');
+    });
+    SCH.generate(ids[name], d(off), 60, 30, D[dn], 3);
+  });
+  // Trent's last rotation ran long (held over until yesterday), so Arifjan's one clear coverage gap starts after Dana flies home
+  db.prepare("UPDATE schedule_blocks SET end = ? WHERE contractor_id = ? AND kind = 'on' AND end = ?").run(d(-1), ids['Trent Vaughn'], d(-5));
+  db.prepare("UPDATE schedule_blocks SET start = ? WHERE contractor_id = ? AND kind = 'off' AND start = ?").run(d(0), ids['Trent Vaughn'], d(-4));
+  const extra = db.prepare('INSERT INTO schedule_blocks (contractor_id, kind, start, end, notes) VALUES (?,?,?,?,?)');
+  extra.run(ids['Tyler Brandt'], 'training', d(9), d(11), 'Recurrent HAZMAT + egress training (Atlanta)');
+  extra.run(ids['John Doe'], 'training', d(14), d(15), 'Pre-deployment brief — Africa sites');
+  extra.run(ids['Trent Vaughn'], 'leave', d(2), d(8), 'Family leave (approved)');
+  extra.run(ids['Mike Brennan'], 'leave', d(55), d(65), 'Holiday leave');
+  extra.run(ids['Ray Castillo'], 'training', d(50), d(52), 'Avionics recurrent');
+  // Titles (kept across resets so Leslie's real list survives the nightly reseed)
+  const TITLES = ['Aircraft Maintenance Technician', 'A&P Mechanic', 'Avionics Technician', 'Crew Chief', 'Inspector / QA', 'Supervisor', 'Lead', 'Site Manager'];
+  if (!db.prepare('SELECT COUNT(*) n FROM titles').get().n) TITLES.forEach((t, k) => db.prepare('INSERT INTO titles (name, sort) VALUES (?,?)').run(t, k));
+  const pick = { 'Marcus Delgado': 'Crew Chief', 'Dana Whitfield': 'Inspector / QA', 'Tyler Brandt': 'Avionics Technician', 'Cody Ramirez': 'A&P Mechanic', 'Brianna Holt': 'Aircraft Maintenance Technician',
+    'Wes Calloway': 'A&P Mechanic', 'John Doe': 'Aircraft Maintenance Technician', 'Sam Kowalski': 'Avionics Technician', 'Trent Vaughn': 'Supervisor', 'Ray Castillo': 'Lead',
+    'Luis Fontaine': 'Aircraft Maintenance Technician', 'Mike Brennan': 'Site Manager' };
+  for (const [n, t] of Object.entries(pick)) db.prepare('UPDATE contractors SET title_id = (SELECT id FROM titles WHERE name = ?) WHERE id = ?').run(t, ids[n]);
 
-  const fl = db.prepare(`INSERT INTO flights (contractor_id, airline, flight_no, from_airport, to_airport, depart_at, arrive_at, confirmation, seat, notes, sent_at, seen_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now', ?),?)`);
+  const flIns = db.prepare(`INSERT INTO flights (contractor_id, airline, flight_no, from_airport, to_airport, depart_at, arrive_at, confirmation, seat, notes, sent_at, seen_at, direction)
+    VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now', ?),?,?)`);
+  let dir = 'outbound';
+  const fl = { run: (...a) => flIns.run(...a, dir) };
   const al = db.prepare("INSERT INTO alerts (contractor_id, kind, title, body, sent_by, created_at, read_at) VALUES (?,?,?,?,'admin',datetime('now', ?),?)");
-  fl.run(ids['Marcus Delgado'], 'Qatar Airways', 'QR 714', 'IAH', 'DOH', `${d(12)}T19:45`, `${d(13)}T17:30`, 'QRDEMO1', '34C', 'Report to IAH Terminal D by 16:45. Bring passport + visa letter.', '-2 hours', null);
-  fl.run(ids['Marcus Delgado'], 'Qatar Airways', 'QR 450', 'DOH', 'EBL', `${d(13)}T20:10`, `${d(13)}T22:40`, 'QRDEMO1', '18A', 'Site driver meets you at arrivals.', '-2 hours', null);
-  fl.run(ids['Dana Whitfield'], 'Emirates', 'EK 856', 'KWI', 'DXB', `${d(40)}T09:20`, `${d(40)}T11:55`, 'EKDEMO7', '22K', 'Return leg — end of rotation.', '-6 days', d(-5));
-  fl.run(ids['Dana Whitfield'], 'Emirates', 'EK 221', 'DXB', 'DFW', `${d(40)}T14:30`, `${d(40)}T20:05`, 'EKDEMO7', '41A', '', '-6 days', d(-5));
-  fl.run(ids['Cody Ramirez'], 'Turkish Airlines', 'TK 34', 'IAH', 'IST', `${d(10)}T21:00`, `${d(11)}T16:50`, 'TKDEMO4', '27H', 'Renew passport after this rotation!', '-1 days', d(0));
+  // Departures / returns spread over today + next 7 days for the Daily Deployment Report (one case per flag type)
+  fl.run(ids['Marcus Delgado'], 'Qatar Airways', 'QR 714', 'IAH', 'DOH', `${d(1)}T19:45`, `${d(2)}T17:30`, 'QRDEMO1', '34C', 'Report to IAH Terminal D by 16:45. Bring passport + visa letter.', '-2 hours', null);
+  fl.run(ids['Marcus Delgado'], 'Qatar Airways', 'QR 450', 'DOH', 'EBL', `${d(2)}T20:10`, `${d(2)}T22:40`, 'QRDEMO1', '18A', 'Site driver meets you at arrivals.', '-2 hours', null);
+  db.prepare("UPDATE flights SET updated_at = datetime('now', '-3 hours') WHERE flight_no = 'QR 450' AND contractor_id = ?").run(ids['Marcus Delgado']); // flag: changed in last 24h
+  fl.run(ids['Cody Ramirez'], 'Delta', 'DL 1123', 'MEM', 'ATL', `${d(3)}T06:10`, `${d(3)}T08:35`, 'TKDEMO4', '14C', 'Renew passport after this rotation!', '-1 days', d(0));
+  fl.run(ids['Cody Ramirez'], 'Turkish Airlines', 'TK 32', 'ATL', 'IST', `${d(3)}T12:20`, `${d(4)}T06:05`, 'TKDEMO4', '27H', '', '-1 days', d(0));
+  fl.run(ids['Cody Ramirez'], 'Turkish Airlines', 'TK 1092', 'IST', 'EBL', `${d(4)}T09:40`, `${d(4)}T12:55`, 'TKDEMO4', '9A', '', '-1 days', d(0));
+  fl.run(ids['Brianna Holt'], 'United', 'UA 2210', 'DEN', 'IAD', `${d(0)}T07:00`, `${d(0)}T12:45`, 'UADEMO5', '22F', '', '-2 days', d(-1));
+  fl.run(ids['Brianna Holt'], 'Kuwait Airways', 'KU 118', 'IAD', 'KWI', `${d(0)}T17:30`, `${d(1)}T13:20`, 'UADEMO5', '31A', 'Typhoid booster due before next rotation.', '-2 days', d(-1));
+  fl.run(ids['Sam Kowalski'], 'Turkish Airlines', 'TK 8', 'MSY', 'IST', `${d(4)}T15:05`, `${d(5)}T10:40`, 'TKDEMO8', '', 'BOOKED BEFORE DOCS CLEARED — hold or cancel.', '-3 days', d(-2)); // flag: RED traveling
+  fl.run(ids['Sam Kowalski'], 'Turkish Airlines', 'TK 1094', 'IST', 'EBL', `${d(5)}T13:15`, `${d(5)}T16:30`, 'TKDEMO8', '', '', '-3 days', d(-2));
+  dir = 'return';
+  fl.run(ids['Luis Fontaine'], 'Flydubai', 'FZ 622', 'JIB', 'DXB', `${d(0)}T03:15`, `${d(0)}T08:00`, 'FZDEMO2', '12A', 'End of rotation — turn in site badge.', '-4 days', d(-3));
+  fl.run(ids['Luis Fontaine'], 'Emirates', 'EK 231', 'DXB', 'IAD', `${d(0)}T09:30`, `${d(0)}T15:20`, 'FZDEMO2', '40C', '', '-4 days', d(-3));
+  fl.run(ids['Luis Fontaine'], 'American', 'AA 2741', 'IAD', 'JAX', `${d(0)}T18:05`, `${d(0)}T20:10`, 'FZDEMO2', '', '', '-4 days', d(-3));
+  fl.run(ids['Dana Whitfield'], 'Emirates', 'EK 856', 'KWI', 'DXB', `${d(2)}T09:20`, `${d(2)}T11:55`, 'EKDEMO7', '22K', 'Return leg — end of rotation.', '-6 days', d(-5));
+  fl.run(ids['Dana Whitfield'], 'Emirates', 'EK 221', 'DXB', 'DFW', `${d(2)}T14:30`, `${d(2)}T20:05`, 'EKDEMO7', '41A', '', '-6 days', d(-5));
+  dir = 'outbound';
   al.run(ids['Marcus Delgado'], 'flight', 'Your flights are booked', 'IAH → DOH → EBL, confirmation QRDEMO1. Check the Flights tab.', '-2 hours', null);
   al.run(ids['Cody Ramirez'], 'readiness', 'Passport renewal needed', 'Your passport will not meet the 6-month rule for your next rotation. Start renewal after this trip.', '-1 days', null);
   al.run(ids['John Doe'], 'urgent', 'Yellow fever shot required', 'Djibouti requires a yellow fever vaccine. Upload your yellow card in the app as soon as you have it.', '-3 hours', null);
@@ -160,6 +218,6 @@ function seed() {
   return { ids };
 }
 
-const SEED_VERSION = '6'; // bump when demo data shape changes; demo servers reseed on boot
-module.exports = { seed, ADMIN, CONTRACTOR_PW, SEED_VERSION };
+const SEED_VERSION = '12'; // bump when demo data shape changes; demo servers reseed on boot
+module.exports = { seed, SEED_VERSION };
 if (require.main === module) { seed(); console.log('Seeded.'); }

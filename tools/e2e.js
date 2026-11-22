@@ -1,7 +1,8 @@
 // End-to-end click-through of every demo flow, with screenshots. Run: node tools/e2e.js  (server must be running)
 const { chromium } = require('playwright');
+const CREDS = Object.fromEntries(require('fs').readFileSync(require('path').join(__dirname, '..', 'private', 'creds.env'), 'utf8').trim().split('\n').map((l) => l.split(/=(.*)/s).slice(0, 2)));
 const BASE = process.env.BASE || 'http://localhost:4300';
-const PW = 'Deploy!2026', ADMIN = ['admin@ffd.demo', 'FFD!Admin2026'];
+const PW = CREDS.CONTRACTOR_PASSWORD, ADMIN = ['admin@ffd.demo', CREDS.ADMIN_PASSWORD];
 const phone = { width: 390, height: 844 }, desk = { width: 1440, height: 900 };
 const results = []; const errs = [];
 const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? ' — ' + extra : ''}`); if (!cond) process.exitCode = 1; };

@@ -190,3 +190,21 @@ CREATE TABLE IF NOT EXISTS admin_alerts (
   ack_at TEXT, ack_by TEXT
 );
 `);
+addCol('flights', 'direction', 'TEXT'); // 'outbound' | 'return' (null = infer from home airport)
+db.exec(`CREATE TABLE IF NOT EXISTS schedule_blocks (
+  id INTEGER PRIMARY KEY,
+  contractor_id INTEGER NOT NULL REFERENCES contractors(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('on','off','travel','training','leave')),
+  start TEXT NOT NULL, end TEXT NOT NULL,             -- inclusive YYYY-MM-DD
+  destination_id INTEGER REFERENCES destinations(id) ON DELETE SET NULL,
+  notes TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+CREATE INDEX IF NOT EXISTS ix_sched_c ON schedule_blocks(contractor_id, start);`);
+addCol('destinations', 'min_headcount', 'INTEGER DEFAULT 0');
+addCol('destinations', 'max_headcount', 'INTEGER');
+db.exec(`CREATE TABLE IF NOT EXISTS titles (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, sort INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1)`);
+addCol('contractors', 'title_id', 'INTEGER REFERENCES titles(id) ON DELETE SET NULL');
+addCol('contractors', 'headshot_upload_id', 'INTEGER');
+addCol('contractors', 'headshot_status', "TEXT"); // pending | approved | rejected
+addCol('contractors', 'headshot_note', "TEXT DEFAULT ''");
+addCol('contractors', 'headshot_at', 'TEXT');

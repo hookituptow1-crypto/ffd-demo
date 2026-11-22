@@ -19,17 +19,26 @@ const diffDays = (a, b) => Math.round((a - b) / DAY);
 const RANK = { green: 0, yellow: 1, red: 2 };
 
 function today() {
-  const t = process.env.DEMO_TODAY ? toDate(process.env.DEMO_TODAY) : new Date();
-  return toDate(fmt(t));
+  // "Today" is the office's calendar day (Leslie is on Pacific time), not the UTC day.
+  if (process.env.DEMO_TODAY) return toDate(process.env.DEMO_TODAY);
+  return toDate(new Intl.DateTimeFormat('en-CA', { timeZone: process.env.APP_TZ || 'America/Los_Angeles' }).format(new Date()));
 }
 
 function rotations(c) {
   const t = today();
+  // Crew schedule is the source of truth when it has ON blocks: current/next ON block + the one after drive the yellow window.
+  const on = (c._on || []).filter((b) => b.end >= fmt(t));
+  if (on.length) {
+    const start = toDate(on[0].start); const end = toDate(on[0].end);
+    const nextStart = on[1] ? toDate(on[1].start) : addDays(end, c.rotation_off);
+    const nextEnd = on[1] ? toDate(on[1].end) : addDays(nextStart, c.rotation_on);
+    return { start, end, nextStart, nextEnd, source: 'schedule' };
+  }
   const start = toDate(c.deploy_date) || t;
   const end = addDays(start, c.rotation_on);
   const nextStart = toDate(c.next_deploy_date) || addDays(end, c.rotation_off);
   const nextEnd = addDays(nextStart, c.rotation_on);
-  return { start, end, nextStart, nextEnd };
+  return { start, end, nextStart, nextEnd, source: 'pattern' };
 }
 
 function evaluate(contractor, requirements, documents, blockers) {
@@ -78,7 +87,7 @@ function evaluate(contractor, requirements, documents, blockers) {
     status, computed_status: computed,
     overridden: !!contractor.override_status, override_reason: contractor.override_reason || null,
     rotation: { start: fmt(r.start), end: fmt(r.end), next_start: fmt(r.nextStart), next_end: fmt(r.nextEnd),
-      days_to_deploy: diffDays(r.start, t), on: contractor.rotation_on, off: contractor.rotation_off },
+      days_to_deploy: diffDays(r.start, t), on: contractor.rotation_on, off: contractor.rotation_off, source: r.source },
     fix_by: fixBy, days_left: fixBy ? diffDays(toDate(fixBy), t) : null,
     items, blockers: activeBlockers.map((b) => ({ id: b.id, description: b.description })),
   };

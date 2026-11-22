@@ -1,5 +1,6 @@
 // Live-site check. MODE=write adds a persistence marker; MODE=check verifies it survived a restart and removes it.
 const { chromium } = require('playwright');
+const CREDS = Object.fromEntries(require('fs').readFileSync(require('path').join(__dirname, '..', 'private', 'creds.env'), 'utf8').trim().split('\n').map((l) => l.split(/=(.*)/s).slice(0, 2)));
 const U = process.env.BASE || 'https://ffd-demo-tyop.onrender.com';
 const MODE = process.env.MODE || 'write';
 (async () => {
@@ -7,7 +8,7 @@ const MODE = process.env.MODE || 'write';
   const ctx = await b.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 }); const p = await ctx.newPage();
   await p.goto(U + '/', { timeout: 60000 }); await p.waitForSelector('.demo-acct', { timeout: 60000 }); await p.waitForTimeout(800);
   if (MODE === 'write') await p.screenshot({ path: 'screens/live-login.png' });
-  await p.fill('#email', 'admin@ffd.demo'); await p.fill('#pw', 'FFD!Admin2026'); await p.click('form button'); await p.waitForSelector('.tile .n', { timeout: 60000 });
+  await p.fill('#email', 'admin@ffd.demo'); await p.fill('#pw', CREDS.ADMIN_PASSWORD); await p.click('form button'); await p.waitForSelector('.tile .n', { timeout: 60000 });
   out.push('admin login OK: board shows ' + await p.textContent('.tile .n') + ' contractors');
   const res = await p.evaluate(async (mode) => {
     const list = (await api('GET', '/api/admin/contractors')).contractors; const c = list.find((x) => x.name === 'Dana Whitfield');
@@ -19,7 +20,7 @@ const MODE = process.env.MODE || 'write';
   out.push(res);
   if (MODE === 'write') await p.screenshot({ path: 'screens/live-admin.png' });
   const q = await (await b.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 })).newPage();
-  await q.goto(U + '/'); await q.fill('#email', 'cody@ffd.demo'); await q.fill('#pw', 'Deploy!2026'); await q.click('form button'); await q.waitForSelector('.verdict', { timeout: 60000 });
+  await q.goto(U + '/'); await q.fill('#email', 'cody@ffd.demo'); await q.fill('#pw', CREDS.CONTRACTOR_PASSWORD); await q.click('form button'); await q.waitForSelector('.verdict', { timeout: 60000 });
   out.push('contractor login OK (cody): ' + await q.textContent('.verdict'));
   if (MODE === 'write') {
     await q.click('[data-tab="profile"]'); await q.waitForTimeout(1500);
@@ -35,7 +36,7 @@ const MODE = process.env.MODE || 'write';
     const t = await p.textContent('.bubble.bot:last-child');
     out.push('assistant John: ' + (t.includes('BLOCKED') || t.includes('Blocked') ? 'blocked (red)' : 'not blocked') + ', origin MEM: ' + t.includes('MEM (home)'));
     const ctx3 = await b.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 }); const r = await ctx3.newPage();
-    await r.goto(U + '/'); await r.fill('#email', 'trent@ffd.demo'); await r.fill('#pw', 'Deploy!2026'); await r.click('form button'); await r.waitForSelector('.verdict', { timeout: 60000 });
+    await r.goto(U + '/'); await r.fill('#email', 'trent@ffd.demo'); await r.fill('#pw', CREDS.CONTRACTOR_PASSWORD); await r.click('form button'); await r.waitForSelector('.verdict', { timeout: 60000 });
     out.push('trent background check: ' + ((await r.textContent('#view')).includes('In progress') ? 'in progress (red)' : '??'));
   }
   console.log(out.join('\n')); await b.close();

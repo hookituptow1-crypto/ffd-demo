@@ -17,14 +17,9 @@ npm run seed            # wipe + reseed demo data (or "Reset demo data" in admin
 npx playwright install chromium && npm run e2e   # full click-through test + screenshots in ./screens
 ```
 
-Demo logins (also shown as tap-to-fill buttons on the login page while `DEMO_MODE` is on):
+Demo logins: admin `admin@ffd.demo`, contractors `<firstname>@ffd.demo`. **Passwords are not in this repo** — set `ADMIN_PASSWORD` and `CONTRACTOR_PASSWORD` in the host's environment (otherwise random ones are generated into `data/demo-credentials.json` on the server). The login page never shows demo accounts.
 
-| Who | Email | Password |
-|---|---|---|
-| Admin | admin@ffd.demo | FFD!Admin2026 |
-| Any contractor | `<firstname>@ffd.demo` (marcus, dana, tyler, cody, brianna, wes, john, sam, trent) | Deploy!2026 |
-
-Set `DEMO_MODE=0` in real use: it hides the demo accounts and disables reset.
+`DEMO_MODE=1` enables the demo scenario page, the admin "Reset demo data" button and an automatic reseed every night at 03:00 Pacific. See `SECURITY-TESTS.md` for the security test results.
 
 ## How the light is computed (`src/status.js`)
 
@@ -53,6 +48,25 @@ Admin types e.g. "John Doe needs to go to Africa". The assistant matches the con
 
 ## Planned: booking inbox (not built)
 Leslie creates a dedicated mailbox (e.g. bookings@company). Forward or BCC airline/agency confirmations to it; a worker polls it (Gmail API / Microsoft Graph), parses confirmations (schema.org FlightReservation markup when present, otherwise an LLM extractor over the email text), matches the passenger name to a contractor, and creates draft flights the admin approves with one click (and that then alert the contractor). Unmatched emails land in a review queue.
+
+## Crew schedule (`src/schedule.js`, admin › Schedule)
+- One row per contractor, Gantt by month (3 months at a time): ON blocks colored by site, OFF, ✈ travel days (first/last day of each ON block), training, leave.
+- Pattern defaults to 60 on / 30 off, editable per person (⚙ on the row). Drag a block to move it, click to edit, click an empty day to add. Every change is audit-logged and alerts the contractor.
+- **Readiness uses the schedule**: the current/next ON block and the one after it are the "this rotation / next rotation" that drive RED/YELLOW. Contractors without a schedule fall back to the deploy date + pattern.
+- Coverage: ON headcount per site per day vs each site's min/max target (Targets button). Gaps red, overstaffing amber.
+- Conflicts: RED contractor with a scheduled rotation, or YELLOW contractor scheduled for the rotation their lapsing item blocks.
+- Contractor app › Schedule: upcoming blocks, travel dates, linked flights, and an `.ics` calendar download.
+
+## Daily Deployment Report (admin › Report)
+- Departing / returning grouped Today, Tomorrow, Next 7 days, or any single day; title filter. Movements come from schedule ON-block start/end plus any booked trip in range.
+- Each row: headshot, name, title, stoplight, site, direction, every leg (airline, flight, airports, local times, seat), PNR, connections, home airport, ☎️ emergency-contact quick view, flags (RED/YELLOW traveling, no flight booked for a scheduled change, flight change pushed in the last 24h).
+- Print / Save-as-PDF stylesheet, CSV export (`/api/admin/reports/daily.csv`, CSV-injection safe), JSON at `/api/admin/reports/daily?date=YYYY-MM-DD[&days=N]` (admin session **or** the read-only report token).
+- **Report token**: `Authorization: Bearer <token>`; the server only knows its SHA-256 (`REPORT_TOKEN_SHA256` env var), it works only on `GET /api/admin/reports/daily`, and the nightly reseed doesn't touch it. `scripts/daily-report.sh [date]` reads the token from `/home/box/.ffd/report-token` (chmod 600, outside the repo). Rotate: write a new token there and update the env var.
+
+## Titles, headshots and ID badge
+- Admin › Titles: add, rename, reorder, deactivate (or delete if unused). Titles survive demo resets. Contractors pick theirs on the intake sheet; admin can change it; shown on board (filterable), detail, schedule, report and badge.
+- Headshot: camera (`capture=user`) or upload → face oval guide → pan/zoom square crop → 512 px JPEG. Server re-checks JPEG magic bytes, ≤1 MB and square 256–1024 px, stores it AES-256-GCM encrypted, status *pending* until admin approves/rejects (contractor is alerted). Contractors can only fetch their own photo. Demo contractors use generated silhouette/initial placeholders (no real photos).
+- ID badge (canvas): headshot (approved only), name, title, FFD patch, stoplight color band, site, ID number, valid-through (end of current/next scheduled rotation capped by the earliest expiring document; RED = NOT VALID). On the contractor home screen and admin detail › ID badge; PNG or PDF download.
 
 ## Security in this prototype
 * Passwords: salted **scrypt** hashes; generic login errors; per-IP rate limit; account lockout after 8 failures.

@@ -155,3 +155,6 @@ function renderProfileForm(el, profile, { open, uploadUrl } = {}) {
   return { collect };
 }
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+// CSP forbids inline style attributes; dynamic layout (Gantt positions etc.) is written as data-style and applied via CSSOM.
+function applyDS(root) { (root.querySelectorAll ? root.querySelectorAll('[data-style]') : []).forEach((e) => { e.style.cssText = e.dataset.style; e.removeAttribute('data-style'); }); if (root.dataset && root.dataset.style) { root.style.cssText = root.dataset.style; root.removeAttribute('data-style'); } }
+new MutationObserver((ms) => ms.forEach((m) => m.addedNodes.forEach((n) => n.nodeType === 1 && applyDS(n)))).observe(document.documentElement, { childList: true, subtree: true });

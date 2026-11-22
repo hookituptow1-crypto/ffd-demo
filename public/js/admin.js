@@ -1,12 +1,12 @@
 'use strict';
-const A = { list: [], filter: { status: '', q: '', dest: '' }, dests: null };
+const A = { list: [], filter: { status: '', q: '', dest: '', title: '' }, dests: null, titles: null };
 const main = () => $('#main');
 const CAT = { passport: '🛂 Passport', visa: '📄 Visa', immunization: '💉 Immunization', id: '🪪 ID', clearance: '🩺 Clearance', other: '📌 Other' };
 async function loadDests() { A.dests = await api('GET', '/api/admin/destinations'); return A.dests; }
 
 // ---------------- Readiness board ----------------
 async function dash() {
-  const { contractors } = await api('GET', '/api/admin/contractors'); A.list = contractors; if (!A.dests) await loadDests();
+  const { contractors } = await api('GET', '/api/admin/contractors'); A.list = contractors; if (!A.dests) await loadDests(); const titles = await getTitles();
   const n = (s) => contractors.filter((c) => c.status === s).length;
   main().innerHTML = `<div class="head"><h1>Readiness board</h1><span class="mut small">${new Date().toDateString()}</span>
       <div class="right row"><button class="btn" id="newC">+ Add contractor</button></div></div>
@@ -16,16 +16,17 @@ async function dash() {
       <button class="tile yellow ${A.filter.status === 'yellow' ? 'on' : ''}" data-st="yellow"><div class="mut small">🟡 FIX BEFORE NEXT ROTATION</div><div class="n">${n('yellow')}</div></button>
       <button class="tile red ${A.filter.status === 'red' ? 'on' : ''}" data-st="red"><div class="mut small">🔴 NO-GO</div><div class="n">${n('red')}</div></button></div>
     <div class="row mb"><input id="q" placeholder="Search name or employee #" value="${esc(A.filter.q)}" class="grow">
-      <select id="dest" class="grow"><option value="">All destinations</option>${A.dests.destinations.map((d) => `<option value="${d.id}" ${String(A.filter.dest) === String(d.id) ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select></div>
+      <select id="dest" class="grow"><option value="">All destinations</option>${A.dests.destinations.map((d) => `<option value="${d.id}" ${String(A.filter.dest) === String(d.id) ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select>
+      <select id="titleF" class="grow">${titleOpts(titles, A.filter.title)}</select></div>
     <div class="card"><table><thead><tr><th>Status</th><th>Contractor</th><th>Destination</th><th>Deploys</th><th>Issues</th><th>Passport</th><th>DOB</th></tr></thead><tbody id="rows"></tbody></table></div>`;
   const rows = () => {
     const q = A.filter.q.toLowerCase();
     const list = contractors.filter((c) => (!A.filter.status || c.status === A.filter.status) && (!A.filter.dest || String(c.destination_id) === String(A.filter.dest))
-      && (!q || c.name.toLowerCase().includes(q) || c.employee_no.toLowerCase().includes(q)));
+      && (!A.filter.title || String(c.title_id) === String(A.filter.title)) && (!q || c.name.toLowerCase().includes(q) || c.employee_no.toLowerCase().includes(q)));
     const order = { red: 0, yellow: 1, green: 2 };
     list.sort((a, b) => order[a.status] - order[b.status] || a.days_to_deploy - b.days_to_deploy);
     $('#rows').innerHTML = list.map((c) => `<tr class="click" data-id="${c.id}"><td>${pill(c.status)}${c.overridden ? '<div class="small mut mt">manual</div>' : ''}</td>
-      <td><b>${esc(c.name)}</b><div class="small mut">${esc(c.employee_no)}${c.unverified ? ` · <span class="pill blue">${c.unverified} to verify</span>` : ''}</div></td>
+      <td><div class="nm">${av(c.id)}<div><b>${esc(c.name)}</b>${c.headshot_status === 'pending' ? ' <span class="pill blue">photo to approve</span>' : ''}<div class="small mut">${esc(c.title || '—')} · ${esc(c.employee_no)}${c.unverified ? ` · <span class="pill blue">${c.unverified} to verify</span>` : ''}</div></div></div></td>
       <td>${esc(c.destination)}<div class="small mut">🛫 ${esc(c.home_airport || '—')}${c.alt_airport ? ` / ${esc(c.alt_airport)}` : ''}</div></td><td>${fdate(c.deploy_date)}<div class="small mut">${c.days_to_deploy > 0 ? `in ${c.days_to_deploy} days` : 'on rotation'}</div></td>
       <td><div class="issues">${c.issues.map((i) => `<span class="pill ${i.status}">${esc(i.name)}</span>`).join('') || '<span class="mut small">None</span>'}</div>${c.fix_by ? `<div class="small mut mt">Fix by ${fdate(c.fix_by)}</div>` : ''}</td>
       <td class="mut">${esc(c.passport_masked) || '—'}</td><td class="mut">${esc(c.dob_masked) || '—'}</td></tr>`).join('') || '<tr><td colspan="7" class="mut center">No matches</td></tr>';
@@ -34,16 +35,18 @@ async function dash() {
   $$('[data-st]').forEach((b) => b.addEventListener('click', () => { A.filter.status = b.dataset.st; dash(); }));
   $('#q').addEventListener('input', (e) => { A.filter.q = e.target.value; rows(); });
   $('#dest').addEventListener('change', (e) => { A.filter.dest = e.target.value; rows(); });
+  $('#titleF').addEventListener('change', (e) => { A.filter.title = e.target.value; rows(); });
   $('#rows').addEventListener('click', (e) => { const tr = e.target.closest('tr[data-id]'); if (tr) location.hash = `#/c/${tr.dataset.id}`; });
   $('#newC').addEventListener('click', () => contractorModal());
 }
 
-function contractorModal(c = {}) {
-  const ds = A.dests.destinations;
+async function contractorModal(c = {}) {
+  const ds = A.dests.destinations; const titles = await getTitles();
   modal(`<div class="row"><h2>${c.id ? 'Edit contractor' : 'Add contractor'}</h2><button class="btn sm right" data-close>✕</button></div>
     <div class="grid2">
       <div><label>Full name *</label><input id="cName" value="${esc(c.name)}"></div><div><label>Employee # *</label><input id="cEmp" value="${esc(c.employee_no)}"></div>
       <div><label>Phone</label><input id="cPhone" value="${esc(c.phone)}"></div><div><label>Email</label><input id="cEmail" value="${esc(c.email)}"></div>
+      <div><label>Title / role</label><select id="cTitle">${titleOpts(titles, c.title_id, '—')}</select></div><div></div>
       <div><label>Destination</label><select id="cDest"><option value="">—</option>${ds.map((d) => `<option value="${d.id}" ${d.id === c.destination_id ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select></div>
       <div><label>Home airport</label><input id="cHome" data-airport value="${esc(c.home_airport)}" placeholder="Code or city" autocomplete="off"></div>
       <div><label>Alternate airport</label><input id="cAlt" data-airport value="${esc(c.alt_airport)}" placeholder="Optional" autocomplete="off"></div><div></div>
@@ -56,10 +59,10 @@ function contractorModal(c = {}) {
     attachAirportPickers(m);
     $('#cSave', m).addEventListener('click', () => guard(async () => {
       const body = { name: $('#cName', m).value, employee_no: $('#cEmp', m).value, phone: $('#cPhone', m).value, email: $('#cEmail', m).value, destination_id: $('#cDest', m).value || null,
-        home_airport: airportVal($('#cHome', m)), alt_airport: airportVal($('#cAlt', m)), deploy_date: $('#cDep', m).value, next_deploy_date: $('#cNext', m).value, rotation_on: +$('#cOn', m).value, rotation_off: +$('#cOff', m).value, notes: $('#cNotes', m).value };
+        home_airport: airportVal($('#cHome', m)), alt_airport: airportVal($('#cAlt', m)), deploy_date: $('#cDep', m).value, next_deploy_date: $('#cNext', m).value, rotation_on: +$('#cOn', m).value, rotation_off: +$('#cOff', m).value, notes: $('#cNotes', m).value, title_id: $('#cTitle', m).value || null };
       const r = c.id ? await api('PUT', `/api/admin/contractors/${c.id}`, body) : await api('POST', '/api/admin/contractors', body);
       if (!c.id && $('#aEmail', m).value) await api('PUT', `/api/admin/contractors/${r.id}/account`, { email: $('#aEmail', m).value, password: $('#aPw', m).value });
-      close(); toast('Saved'); location.hash = `#/c/${c.id || r.id}`; route();
+      A.titles = null; close(); toast('Saved'); location.hash = `#/c/${c.id || r.id}`; route();
     }));
     $('#cDel', m)?.addEventListener('click', () => guard(async () => { if (!confirm(`Delete ${c.name}? This removes all their records.`)) return; await api('DELETE', `/api/admin/contractors/${c.id}`); close(); location.hash = '#/'; }));
   });
@@ -69,15 +72,15 @@ function contractorModal(c = {}) {
 async function detail(id, sub = 'readiness') {
   if (!A.dests) await loadDests();
   const d = await api('GET', `/api/admin/contractors/${id}`); const c = d.contractor; const r = d.readiness;
-  main().innerHTML = `<div class="head"><a href="#/" class="btn sm">← Board</a><h1>${esc(c.name)}</h1>${pill(r.status)}${r.overridden ? '<span class="pill gray">manual override</span>' : ''}
+  main().innerHTML = `<div class="head"><a href="#/" class="btn sm">← Board</a>${av(c.id, 'lg')}<div><h1>${esc(c.name)}</h1><div class="small mut">${esc(c.title || 'No title set')}</div></div>${pill(r.status)}${r.overridden ? '<span class="pill gray">manual override</span>' : ''}
       <div class="right row"><button class="btn" id="edit">Edit</button></div></div>
     <div class="row wrap mb small mut"><span>${esc(c.employee_no)}</span>·<span>📍 ${esc((A.dests.destinations.find((x) => x.id === c.destination_id) || {}).name || '—')}</span>·
       <span>Rotation ${fdate(r.rotation.start)} → ${fdate(r.rotation.end)}</span>·<span>Next ${fdate(r.rotation.next_start)}</span>·<span>🛫 Home ${esc(airportLabel(c.home_airport) || '—')}${c.alt_airport ? ` · alt ${esc(c.alt_airport)}` : ''}</span>·<span>${c.rotation_on}/${c.rotation_off}</span>·<span>Login: ${esc(d.account_email || 'none')}</span></div>
-    <div class="tabs">${[['readiness', 'Readiness'], ['profile', 'Profile / intake'], ['flights', `Flights (${d.flights.length})`], ['alerts', 'Alerts'], ['account', 'App login']].map(([k, t]) => `<button data-sub="${k}" class="${k === sub ? 'on' : ''}">${t}</button>`).join('')}</div>
+    <div class="tabs">${[['readiness', 'Readiness'], ['profile', 'Profile / intake'], ['flights', `Flights (${d.flights.length})`], ['alerts', 'Alerts'], ['schedule', 'Schedule'], ['badge', 'ID badge'], ['account', 'App login']].map(([k, t]) => `<button data-sub="${k}" class="${k === sub ? 'on' : ''}">${t}</button>`).join('')}</div>
     <div id="sub"></div>`;
   $('#edit').addEventListener('click', () => contractorModal(c));
   $$('[data-sub]').forEach((b) => b.addEventListener('click', () => { location.hash = `#/c/${id}/${b.dataset.sub}`; }));
-  ({ readiness: subReadiness, profile: subProfile, flights: subFlights, alerts: subAlerts, account: subAccount })[sub](d);
+  ({ readiness: subReadiness, profile: subProfile, flights: subFlights, alerts: subAlerts, account: subAccount, schedule: subSchedule, badge: subBadge })[sub](d);
 }
 function subReadiness(d) {
   const c = d.contractor; const r = d.readiness;
@@ -153,14 +156,37 @@ function subProfile(d) {
   $('#pSave').addEventListener('click', () => guard(async () => { await api('PUT', `/api/admin/contractors/${c.id}/profile`, { profile: form.collect() }); toast('Profile saved'); }));
   $('#upB').addEventListener('click', () => guard(async () => { const f = $('#upF').files[0]; if (!f) throw new Error('Choose a file'); await api('POST', `/api/admin/contractors/${c.id}/uploads`, await fileToPayload(f, $('#upL').value || f.name)); detail(c.id, 'profile'); }));
 }
+function subSchedule(d) {
+  const KL = { on: 'ON rotation', off: 'OFF', travel: 'Travel', training: 'Training', leave: 'Leave' }; const t = d.readiness.rotation;
+  const dn = (id) => (A.dests.destinations.find((x) => x.id === id) || {}).name || '';
+  $('#sub').innerHTML = `<div class="card"><div class="row"><h2>Schedule</h2><span class="small mut">Readiness uses rotation ${fdate(t.start)} → ${fdate(t.end)} and next ${fdate(t.next_start)} (${t.source === 'schedule' ? 'from schedule' : 'from pattern'})</span><a class="btn right" href="#/schedule">Open crew schedule</a></div>
+    <table class="mt"><thead><tr><th>Type</th><th>Site</th><th>Dates</th><th>Days</th><th>Notes</th></tr></thead><tbody>${d.schedule.map((b) => `<tr><td><span class="pill ${b.kind === 'on' ? 'green' : 'gray'}">${KL[b.kind]}</span></td><td>${esc(dn(b.destination_id))}</td><td>${fdate(b.start)} → ${fdate(b.end)}</td><td>${Math.round((Date.parse(b.end) - Date.parse(b.start)) / 86400000) + 1}</td><td class="small">${esc(b.notes)}</td></tr>`).join('') || '<tr><td colspan="5" class="mut">No schedule yet.</td></tr>'}</tbody></table></div>`;
+}
+async function subBadge(d) {
+  const c = d.contractor; const b = await api('GET', `/api/admin/contractors/${c.id}/badge`); b.v = Date.now();
+  $('#sub').innerHTML = `<div class="cols"><div class="card"><h2>ID badge</h2><canvas id="bcv" class="badge-cv"></canvas>
+      <div class="row mt" data-style="justify-content:center"><button class="btn" id="bPng">⬇️ PNG</button><button class="btn" id="bPdf">⬇️ PDF</button></div></div>
+    <div class="card"><h2>Headshot</h2><div class="row">${av(c.id, 'lg')}<div><div>Status: ${b.headshot_status === 'approved' ? '<span class="pill green">Approved</span>' : b.headshot_status === 'pending' ? '<span class="pill blue">Waiting for approval</span>' : b.headshot_status === 'rejected' ? '<span class="pill red">Rejected</span>' : '<span class="pill gray">Placeholder (none uploaded)</span>'}</div>
+      ${b.headshot_note ? `<div class="small mut">${esc(b.headshot_note)}</div>` : ''}</div></div>
+      ${b.headshot_status === 'pending' ? `<div class="mt"><img src="/api/headshot/${c.id}?v=${b.v}" alt="" data-style="width:200px;border-radius:10px"></div><div class="row mt"><button class="btn pri" id="hsOk">✓ Approve photo</button><input id="hsNote" placeholder="Reason if rejecting"><button class="btn danger" id="hsNo">Reject</button></div>` : ''}
+      <button class="btn mt" id="hsAdmin">📸 Upload / replace headshot (auto-approved)</button>
+      <p class="small mut mt">Valid through = end of the current/next scheduled rotation, capped by the earliest expiring requirement. RED readiness shows NOT VALID.</p></div></div>`;
+  await drawBadge($('#bcv'), b);
+  $('#bPng').addEventListener('click', () => badgePng($('#bcv'), b)); $('#bPdf').addEventListener('click', () => badgePdf($('#bcv'), b));
+  const re = () => detail(c.id, 'badge');
+  $('#hsOk')?.addEventListener('click', () => guard(async () => { await api('POST', `/api/admin/contractors/${c.id}/headshot/review`, { decision: 'approved' }); toast('Photo approved — contractor alerted'); re(); }));
+  $('#hsNo')?.addEventListener('click', () => guard(async () => { await api('POST', `/api/admin/contractors/${c.id}/headshot/review`, { decision: 'rejected', note: $('#hsNote').value }); toast('Photo rejected — contractor alerted'); re(); }));
+  $('#hsAdmin').addEventListener('click', () => headshotPicker(async (data) => { await api('POST', `/api/admin/contractors/${c.id}/headshot`, { data }); toast('Headshot saved'); re(); }));
+}
 function flightForm(f = {}) {
   return `<div class="grid3"><div><label>Airline *</label><input id="fAir" value="${esc(f.airline)}"></div><div><label>Flight # *</label><input id="fNo" value="${esc(f.flight_no)}"></div><div><label>Confirmation #</label><input id="fConf" value="${esc(f.confirmation)}"></div>
     <div><label>From (IATA) *</label><input id="fFrom" maxlength="3" value="${esc(f.from_airport)}"></div><div><label>To (IATA) *</label><input id="fTo" maxlength="3" value="${esc(f.to_airport)}"></div><div><label>Seat</label><input id="fSeat" value="${esc(f.seat)}"></div>
+    <div><label>Direction</label><select id="fDir"><option value="">Auto (from home airport)</option><option value="outbound" ${f.direction === 'outbound' ? 'selected' : ''}>Outbound (to site)</option><option value="return" ${f.direction === 'return' ? 'selected' : ''}>Return (home)</option></select></div><div></div><div></div>
     <div><label>Departs (local) *</label><input id="fDep" type="datetime-local" value="${esc(f.depart_at)}"></div><div><label>Arrives (local)</label><input id="fArr" type="datetime-local" value="${esc(f.arrive_at)}"></div></div>
     <label>Notes for contractor</label><textarea id="fNotes" rows="2">${esc(f.notes)}</textarea>`;
 }
 const readFlight = (m) => ({ airline: $('#fAir', m).value, flight_no: $('#fNo', m).value, confirmation: $('#fConf', m).value, from_airport: $('#fFrom', m).value, to_airport: $('#fTo', m).value,
-  seat: $('#fSeat', m).value, depart_at: $('#fDep', m).value, arrive_at: $('#fArr', m).value, notes: $('#fNotes', m).value });
+  seat: $('#fSeat', m).value, depart_at: $('#fDep', m).value, arrive_at: $('#fArr', m).value, notes: $('#fNotes', m).value, direction: $('#fDir', m).value });
 function subFlights(d) {
   const c = d.contractor;
   $('#sub').innerHTML = `<div class="cols"><div class="card"><h2>Send flight to ${esc(c.name.split(' ')[0])}</h2><p class="small mut">Shows up instantly in their app with a NEW badge and an alert (and a push notification if they enabled it).</p>
@@ -262,7 +288,7 @@ async function scenarios() {
   const info = await api('GET', '/api/demo-info');
   const by = (n) => contractors.find((c) => c.name === n) || {};
   const card = (name, title, story) => { const c = by(name); return `<div class="card"><h3>${pill(c.status || 'gray')} ${esc(title)}</h3><p><b>${esc(name)}</b> · ${esc(c.destination || '')}</p><p class="small mut">${story}</p>
-    <div class="small">Login: <code>${esc((info.contractors.find((x) => x.name === name) || {}).email || '')}</code> / <code>${esc(info.contractor_password || '')}</code></div>
+    <div class="small">Login: <code>${esc((info.contractors.find((x) => x.name === name) || {}).email || '')}</code> <span class="mut">· password shared privately</span></div>
     <div class="row mt"><a class="btn sm" href="#/c/${c.id}">Open admin record</a></div></div>`; };
   main().innerHTML = `<div class="head"><h1>🎬 Demo scenarios</h1><div class="right row"><button class="btn danger" id="reset">↺ Reset demo data</button></div></div>
     <p class="small mut">All people and documents are fictional. Open a contractor login in a phone-sized window (or a second browser) to see their side.</p>
@@ -374,9 +400,13 @@ async function route() {
     if (parts[0] === 'destinations') return destinations();
     if (parts[0] === 'audit') return audit();
     if (parts[0] === 'map') return mapPage();
+    if (parts[0] === 'report') return reportPage(qs);
+    if (parts[0] === 'schedule') return schedulePage(qs);
+    if (parts[0] === 'titles') return titlesPage();
     return dash();
   });
 }
 $('#logout').addEventListener('click', (e) => { e.preventDefault(); logout(); });
+$('#resetDemo')?.addEventListener('click', (e) => { e.preventDefault(); guard(async () => { if (!confirm('Reset ALL demo data to the starting scenarios? Everyone will be signed out.')) return; await api('POST', '/api/admin/demo/reset'); location.href = '/'; }); });
 window.addEventListener('hashchange', route);
 (async () => { if (await requireRole('admin')) { route(); sosPoll(); setInterval(sosPoll, 15000); } })();

@@ -8,7 +8,8 @@ const C = require('./crypto');
 const V = require('./validate');
 const { evaluate } = require('./status');
 const assistant = require('./assistant');
-const { seed, ADMIN, CONTRACTOR_PW, SEED_VERSION } = require('./seed');
+const { seed, SEED_VERSION } = require('./seed');
+const SEC = require('./security');
 
 const PORT = Number(process.env.PORT || 4300);
 const DEMO_MODE = process.env.DEMO_MODE !== '0';
@@ -19,6 +20,19 @@ if (!db.prepare('SELECT COUNT(*) n FROM users').get().n || (DEMO_MODE && db.meta
   for (const f of fs.readdirSync(UPLOAD_DIR)) fs.unlinkSync(path.join(UPLOAD_DIR, f));
   seed(); console.log(`Seeded demo data v${SEED_VERSION}`);
 }
+function resetDemo(reason) {
+  for (const f of fs.readdirSync(UPLOAD_DIR)) fs.unlinkSync(path.join(UPLOAD_DIR, f));
+  seed();
+  db.prepare("INSERT INTO audit_log (user_id, action, details, ip) VALUES (NULL, 'demo_reseed', ?, '')").run(reason);
+  console.log(`Demo reseeded: ${reason}`);
+}
+// Self-restoring demo: reseed every night at 03:00 America/Los_Angeles (DST-aware), once per day.
+if (DEMO_MODE) setInterval(() => {
+  const f = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit' })
+    .formatToParts(new Date()).map((x) => [x.type, x.value]));
+  const day = `${f.year}-${f.month}-${f.day}`;
+  if (f.hour === '03' && db.meta.get('last_nightly_reseed') !== day) { db.meta.set('last_nightly_reseed', day); resetDemo('nightly 3am Pacific reseed'); }
+}, 60000).unref();
 
 // ---- Web push (VAPID keys generated once, stored server-side only) ----
 const vapidPath = path.join(__dirname, '..', 'data', 'vapid.json');
@@ -33,25 +47,38 @@ app.use((req, res, next) => {
   res.set({
     'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob: https://tile.openstreetmap.org; style-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY',
-    'Permissions-Policy': 'camera=(self), geolocation=(self), microphone=()', 'Cross-Origin-Opener-Policy': 'same-origin',
+    'Permissions-Policy': 'camera=(self), geolocation=(self), microphone=(), payment=(), usb=(), interest-cohort=()', 'Cross-Origin-Opener-Policy': 'same-origin',
+    'Cross-Origin-Resource-Policy': 'same-origin', 'X-Permitted-Cross-Domain-Policies': 'none', 'Origin-Agent-Cluster': '?1',
   });
-  if (req.secure) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  if (req.path.startsWith('/api/')) res.set({ 'Cache-Control': 'no-store', Pragma: 'no-cache' });
+  if (req.secure) res.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
   next();
 });
-app.use(express.json({ limit: '8mb' }));
+// Health check (no auth, no data) for Render
+app.get('/health', (req, res) => { try { db.prepare('SELECT 1').get(); res.json({ ok: true }); } catch { res.status(503).json({ ok: false }); } });
+const BIG_BODY = /^\/api\/(my\/headshot|admin\/contractors\/\d+\/headshot|my\/uploads|my\/requirements\/\d+|admin\/contractors\/\d+\/(uploads|documents\/\d+))$/;
+app.use((req, res, next) => express.json({ limit: BIG_BODY.test(req.path) ? '8mb' : '64kb', strict: true })(req, res, next));
+// Rate limits (per real client IP): all API calls, plus a tighter budget for writes
+app.use('/api', SEC.limit('api', 1200, 5 * 60000));
+app.use('/api', (req, res, next) => (['GET', 'HEAD'].includes(req.method) ? next() : SEC.limit('write', 300, 5 * 60000)(req, res, next)));
 
 // ---------------- helpers ----------------
+const crypto = require('crypto');
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const audit = (req, action, details = '') => db.prepare('INSERT INTO audit_log (user_id, action, details, ip) VALUES (?,?,?,?)')
-  .run(req.user ? req.user.id : null, action, String(details).slice(0, 500), req.ip || '');
+  .run(req.user ? req.user.id : null, action, String(details).slice(0, 500), req.clientIp || (req.get ? SEC.clientIp(req) : '') || '');
 const nf = (m = 'Not found') => Object.assign(new Error(m), { status: 404 });
 const idParam = (v) => { const n = Number(v); if (!Number.isInteger(n) || n < 1) throw nf(); return n; };
 
 function parseCookies(h = '') {
   return Object.fromEntries(h.split(';').map((p) => p.trim().split('=')).filter((a) => a[0]).map(([k, ...v]) => [k, decodeURIComponent(v.join('='))]));
 }
+const COOKIE = (req) => (req.secure ? '__Host-ffd_sid' : 'ffd_sid'); // __Host- prefix = Secure, Path=/, no Domain (can't be planted by subdomains)
+const getTok = (req) => { const c = parseCookies(req.headers.cookie); return c['__Host-ffd_sid'] || c.ffd_sid; };
+const clearCookie = (req) => `${COOKIE(req)}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0${req.secure ? '; Secure' : ''}`;
 function auth(req, res, next) {
-  const tok = parseCookies(req.headers.cookie).ffd_sid;
+  req.clientIp = SEC.clientIp(req);
+  const tok = getTok(req);
   if (tok) {
     const s = db.prepare('SELECT s.*, u.email, u.role, u.contractor_id FROM sessions s JOIN users u ON u.id = s.user_id WHERE token_hash = ?').get(C.sha256(tok));
     if (s && s.expires_at > Date.now()) req.user = { id: s.user_id, email: s.email, role: s.role, contractor_id: s.contractor_id, csrf: s.csrf };
@@ -61,8 +88,12 @@ function auth(req, res, next) {
 app.use(auth);
 // CSRF: every state-changing request needs the per-session token in a header (cookie is also SameSite=Strict)
 app.use('/api', (req, res, next) => {
-  if (['GET', 'HEAD'].includes(req.method) || req.path === '/login') return next();
-  if (!req.user || req.get('x-csrf-token') !== req.user.csrf) return res.status(403).json({ error: 'Session expired — please sign in again' });
+  if (['GET', 'HEAD'].includes(req.method)) return next();
+  // Defense in depth: reject cross-site writes by Origin, then require the per-session CSRF token
+  const origin = req.get('origin');
+  if (origin && origin !== `${req.protocol}://${req.get('host')}`) return res.status(403).json({ error: 'Cross-site request blocked' });
+  if (req.path === '/login') return next();
+  if (!req.user || !req.get('x-csrf-token') || req.get('x-csrf-token') !== req.user.csrf) return res.status(403).json({ error: 'Session expired — please sign in again' });
   next();
 });
 const need = (role) => (req, res, next) => {
@@ -73,8 +104,11 @@ const need = (role) => (req, res, next) => {
 
 const getReqs = (destId) => db.prepare(`SELECT rt.* FROM requirement_types rt JOIN destination_requirements dr ON dr.requirement_type_id = rt.id
   WHERE dr.destination_id = ? ORDER BY CASE rt.category WHEN 'passport' THEN 0 WHEN 'visa' THEN 1 WHEN 'id' THEN 2 WHEN 'immunization' THEN 3 ELSE 4 END, rt.name`).all(destId || 0);
+const SCH = require('./schedule');
+const fmtToday = () => require('./status').fmt(require('./status').today());
+const titleName = (id) => (id ? (db.prepare('SELECT name FROM titles WHERE id = ?').get(id) || {}).name || '' : '');
 function readiness(c) {
-  return evaluate(c, getReqs(c.destination_id), db.prepare('SELECT * FROM documents WHERE contractor_id = ?').all(c.id),
+  return evaluate({ ...c, _on: SCH.onBlocks(c.id) }, getReqs(c.destination_id), db.prepare('SELECT * FROM documents WHERE contractor_id = ?').all(c.id),
     db.prepare('SELECT * FROM blockers WHERE contractor_id = ?').all(c.id));
 }
 const getContractor = (id) => { const c = db.prepare('SELECT * FROM contractors WHERE id = ?').get(id); if (!c) throw nf(); return c; };
@@ -101,46 +135,49 @@ function sendAlert(cids, kind, title, body, by) {
 }
 
 // --------------- auth ---------------
-const attempts = new Map(); // ip -> [timestamps]
-app.post('/api/login', wrap(async (req, res) => {
-  const ip = req.ip || 'x'; const now = Date.now();
-  const list = (attempts.get(ip) || []).filter((t) => now - t < 15 * 60000);
-  if (list.length >= 20) return res.status(429).json({ error: 'Too many failed attempts. Try again in 15 minutes.' });
-  const noteFail = () => { list.push(now); attempts.set(ip, list); }; // only failed logins count toward the per-IP limit
-  const email = V.str(req.body.email, 120, { required: true, name: 'Email' });
+// Brute force: max 10 failed logins per client IP per 15 min, max 5 per account+IP per 15 min, and a soft cap of
+// 50 failures per account per hour from all IPs. Responses are identical for unknown users, wrong passwords and
+// lockouts (no account enumeration), and a hash is always computed so timing doesn't leak either.
+const DUMMY_HASH = C.hashPassword(C.token());
+app.post('/api/login', SEC.limit('login', 30, 15 * 60000), wrap(async (req, res) => {
+  const ip = req.clientIp;
+  const email = V.str(req.body.email, 120, { required: true, name: 'Email' }).toLowerCase();
   const password = V.str(req.body.password, 200, { required: true, name: 'Password' });
+  const W = 15 * 60000;
+  const blocked = SEC.peek(`lf-ip:${ip}`, W) >= 10 || SEC.peek(`lf-acct-ip:${email}:${ip}`, W) >= 5 || SEC.peek(`lf-acct:${email}`, 3600000) >= 50;
   const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-  const fail = () => { noteFail(); return res.status(401).json({ error: 'Email or password is incorrect' }); };
-  if (!u) { C.hashPassword(password); return fail(); } // equalize timing
-  if (u.locked_until && new Date(u.locked_until) > new Date()) return res.status(423).json({ error: 'Account temporarily locked after failed attempts. Try again later.' });
-  if (!C.verifyPassword(password, u.password_hash)) {
-    const n = u.failed_logins + 1;
-    db.prepare('UPDATE users SET failed_logins = ?, locked_until = ? WHERE id = ?').run(n >= 8 ? 0 : n, n >= 8 ? new Date(now + 15 * 60000).toISOString() : null, u.id);
-    audit({ ip, user: { id: u.id } }, 'login_failed', email);
-    return fail();
+  const good = C.verifyPassword(password, u ? u.password_hash : DUMMY_HASH) && !!u;
+  if (blocked || !good) {
+    if (!good) { SEC.hit(`lf-ip:${ip}`, 1e9, W); SEC.hit(`lf-acct-ip:${email}:${ip}`, 1e9, W); SEC.hit(`lf-acct:${email}`, 1e9, 3600000); }
+    audit({ clientIp: ip, user: u ? { id: u.id } : null }, blocked ? 'login_blocked' : 'login_failed', email);
+    await new Promise((r) => setTimeout(r, 300 + Math.random() * 300)); // slow down guessing
+    return res.status(401).json({ error: 'Email or password is incorrect, or too many attempts. Wait 15 minutes and try again.' });
   }
-  db.prepare('UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?').run(u.id);
-  const tok = C.token(); const csrf = C.token();
+  SEC.reset(`lf-acct-ip:${email}:${ip}`);
+  // Session fixation: any session presented with this request is destroyed; a brand-new random token is issued.
+  const old = getTok(req); if (old) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(C.sha256(old));
+  const now = Date.now(); const tok = C.token(); const csrf = C.token();
   db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(now);
   db.prepare('INSERT INTO sessions (token_hash, user_id, csrf, expires_at) VALUES (?,?,?,?)').run(C.sha256(tok), u.id, csrf, now + SESSION_HOURS * 3600000);
-  res.set('Set-Cookie', `ffd_sid=${tok}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${SESSION_HOURS * 3600}${req.secure ? '; Secure' : ''}`);
-  audit({ ip, user: { id: u.id } }, 'login', email);
+  res.set('Set-Cookie', `${COOKIE(req)}=${tok}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${SESSION_HOURS * 3600}${req.secure ? '; Secure' : ''}`);
+  audit({ clientIp: ip, user: { id: u.id } }, 'login', email);
   res.json({ role: u.role, csrf });
 }));
 app.post('/api/logout', need(), (req, res) => {
-  const tok = parseCookies(req.headers.cookie).ffd_sid;
-  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(C.sha256(tok || ''));
-  res.set('Set-Cookie', 'ffd_sid=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0');
+  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(C.sha256(getTok(req) || ''));
+  res.set('Set-Cookie', clearCookie(req));
+  audit(req, 'logout', req.user.email);
   res.json({ ok: true });
 });
 app.get('/api/me', (req, res) => {
   if (!req.user) return res.status(401).json({ error: 'Sign in required' });
   res.json({ email: req.user.email, role: req.user.role, csrf: req.user.csrf, vapid: VAPID.publicKey });
 });
-app.get('/api/demo-info', (req, res) => {
+// Demo scenario list (admin only; never includes passwords)
+app.get('/api/demo-info', need('admin'), (req, res) => {
   if (!DEMO_MODE) return res.json({ demo: false });
   const cs = db.prepare('SELECT c.name, c.notes, u.email FROM contractors c JOIN users u ON u.contractor_id = c.id ORDER BY c.employee_no').all();
-  res.json({ demo: true, admin: ADMIN, contractor_password: CONTRACTOR_PW, contractors: cs.map((c) => ({ ...c, status: readiness(db.prepare('SELECT * FROM contractors WHERE name = ?').get(c.name)).status })) });
+  res.json({ demo: true, contractors: cs });
 });
 
 // --------------- contractor ---------------
@@ -149,7 +186,7 @@ app.get('/api/my/status', need('contractor'), (req, res) => {
   const c = me(req);
   const flights = db.prepare('SELECT * FROM flights WHERE contractor_id = ? ORDER BY depart_at').all(c.id);
   const alerts = db.prepare('SELECT * FROM alerts WHERE contractor_id = ? ORDER BY created_at DESC, id DESC LIMIT 50').all(c.id);
-  res.json({ contractor: { id: c.id, name: c.name, employee_no: c.employee_no, destination: destName(c.destination_id) },
+  res.json({ contractor: { id: c.id, name: c.name, employee_no: c.employee_no, title: titleName(c.title_id), destination: destName(c.destination_id) },
     readiness: readiness(c), flights, alerts, unread_alerts: alerts.filter((a) => !a.read_at).length,
     new_flights: flights.filter((f) => !f.seen_at).length });
 });
@@ -161,18 +198,38 @@ app.post('/api/my/alerts/read', need('contractor'), (req, res) => {
   db.prepare("UPDATE alerts SET read_at = datetime('now') WHERE contractor_id = ? AND read_at IS NULL").run(req.user.contractor_id);
   res.json({ ok: true });
 });
-app.get('/api/my/profile', need('contractor'), (req, res) => res.json({ profile: getProfile(req.user.contractor_id), uploads: listUploads(req.user.contractor_id) }));
+app.get('/api/my/profile', need('contractor'), (req, res) => res.json({ profile: getProfile(req.user.contractor_id), uploads: listUploads(req.user.contractor_id),
+  title_id: me(req).title_id, titles: activeTitles() }));
+// My Schedule: upcoming blocks, travel days and the flights that go with each rotation
+function mySchedule(c) {
+  const t = fmtToday();
+  const flights = db.prepare('SELECT * FROM flights WHERE contractor_id = ? ORDER BY depart_at').all(c.id);
+  const near = (date) => flights.filter((f) => Math.abs(Date.parse(f.depart_at.slice(0, 10)) - Date.parse(date)) <= 2 * 86400000);
+  const blocks = SCH.blocks(c.id).filter((b) => b.end >= SCH.plus(t, -7)).map((b) => ({ ...b, site: b.destination_id ? destName(b.destination_id) : '',
+    travel_out: b.kind === 'on' ? b.start : null, travel_home: b.kind === 'on' ? b.end : null,
+    flights_out: b.kind === 'on' ? near(b.start).map((f) => f.id) : [], flights_home: b.kind === 'on' ? near(b.end).map((f) => f.id) : [] }));
+  return { today: t, blocks, flights, pattern: { on: c.rotation_on, off: c.rotation_off } };
+}
+app.get('/api/my/schedule', need('contractor'), (req, res) => res.json(mySchedule(me(req))));
+app.get('/api/my/schedule.ics', need('contractor'), (req, res) => {
+  const c = me(req); const sc = mySchedule(c);
+  res.set({ 'Content-Type': 'text/calendar; charset=utf-8', 'Content-Disposition': 'attachment; filename="ffd-schedule.ics"' }).send(SCH.ics(c.name, sc.blocks, sc.flights));
+});
 app.put('/api/my/profile', need('contractor'), (req, res) => {
   const p = V.profile(req.body.profile);
   const ec = p.emergency_contacts[0];
   if (!ec || !ec.name || !ec.phone) throw new V.VErr('Primary emergency contact name and mobile phone are required');
   saveProfile(req.user.contractor_id, p, 'contractor');
+  if (req.body.title_id !== undefined) {
+    const tid = titleParam(req.body.title_id); const old = me(req).title_id;
+    if (tid !== old) { db.prepare('UPDATE contractors SET title_id = ? WHERE id = ?').run(tid, req.user.contractor_id); audit(req, 'title_change_self', `${titleName(old) || '—'} → ${titleName(tid) || '—'}`); }
+  }
   const synced = syncProfileToDocs(req.user.contractor_id, p);
   audit(req, 'profile_update_self', `contractor ${req.user.contractor_id}; synced: ${synced.join(', ')}`);
   res.json({ ok: true, synced, readiness: readiness(me(req)) });
 });
 // Contractor submits/updates one requirement (e.g. yellow fever card) — self-reported until admin verifies.
-app.post('/api/my/requirements/:typeId', need('contractor'), (req, res) => {
+app.post('/api/my/requirements/:typeId', need('contractor'), SEC.limit('upload', 30, 10 * 60000, (r) => `u${r.user.id}`), (req, res) => {
   const c = me(req); const typeId = idParam(req.params.typeId);
   const rt = getReqs(c.destination_id).find((r) => r.id === typeId); if (!rt) throw nf('Requirement not required for your site');
   const issued = V.date(req.body.issued, { name: 'Issued / shot date' });
@@ -191,10 +248,10 @@ app.post('/api/my/requirements/:typeId', need('contractor'), (req, res) => {
   res.json({ ok: true, readiness: readiness(c) });
 });
 app.get('/api/my/uploads', need('contractor'), (req, res) => res.json({ uploads: listUploads(req.user.contractor_id) }));
-app.post('/api/my/uploads', need('contractor'), (req, res) => {
+app.post('/api/my/uploads', need('contractor'), SEC.limit('upload', 30, 10 * 60000, (r) => `u${r.user.id}`), (req, res) => {
   const id = storeUpload(req.user.contractor_id, req.body, 'contractor'); audit(req, 'upload', `id ${id}`); res.json({ ok: true, id });
 });
-app.post('/api/my/push', need('contractor'), (req, res) => {
+app.post('/api/my/push', need('contractor'), SEC.limit('push', 10, 60 * 60000, (r) => `u${r.user.id}`), (req, res) => {
   const s = req.body.subscription || {};
   const endpoint = V.str(s.endpoint, 1000, { required: true, name: 'endpoint', pattern: /^https:\/\// });
   const keys = { p256dh: V.str(s.keys && s.keys.p256dh, 200, { required: true, name: 'p256dh' }), auth: V.str(s.keys && s.keys.auth, 100, { required: true, name: 'auth' }) };
@@ -219,10 +276,72 @@ const listUploads = (cid) => db.prepare('SELECT id, label, mime, size, uploaded_
 app.get('/api/uploads/:id', need(), (req, res) => {
   const u = db.prepare('SELECT * FROM uploads WHERE id = ?').get(idParam(req.params.id));
   if (!u || (req.user.role !== 'admin' && u.contractor_id !== req.user.contractor_id)) throw nf();
-  res.set({ 'Content-Type': u.mime, 'Cache-Control': 'private, no-store', 'Content-Disposition': 'inline' });
+  audit(req, 'upload_view', `upload ${u.id} (contractor ${u.contractor_id})`);
+  const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'application/pdf': 'pdf' }[u.mime];
+  res.set({ 'Content-Type': u.mime, 'Cache-Control': 'private, no-store', 'Content-Disposition': `attachment; filename="document-${u.id}.${ext}"`,
+    'Content-Security-Policy': "default-src 'none'; sandbox", 'X-Content-Type-Options': 'nosniff' });
   res.send(C.decrypt(fs.readFileSync(path.join(UPLOAD_DIR, u.file))));
 });
 
+// --------------- headshot + ID badge ---------------
+// Headshot: client crops to a square JPEG (256–1024 px); we re-check type, magic bytes, size and square dimensions, store it encrypted, and mark it pending.
+function jpegSize(buf) {
+  let i = 2;
+  while (i + 9 < buf.length) {
+    if (buf[i] !== 0xff) return null;
+    const m = buf[i + 1]; const len = buf.readUInt16BE(i + 2);
+    if (m >= 0xc0 && m <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(m)) return { h: buf.readUInt16BE(i + 5), w: buf.readUInt16BE(i + 7) };
+    i += 2 + len;
+  }
+  return null;
+}
+function storeHeadshot(c, body, by) {
+  const b64 = V.str(body.data, 2_000_000, { required: true, name: 'Photo' });
+  const buf = Buffer.from(b64.replace(/^data:image\/jpeg;base64,/, ''), 'base64');
+  if (buf.length > 1024 * 1024) throw new V.VErr('Photo too large (max 1 MB after cropping)');
+  if (!MAGIC['image/jpeg'].every((b, i) => buf[i] === b)) throw new V.VErr('Headshot must be a JPEG image');
+  const dim = jpegSize(buf);
+  if (!dim || dim.w !== dim.h || dim.w < 256 || dim.w > 1024) throw new V.VErr('Headshot must be a square photo between 256 and 1024 px');
+  const file = `${C.token()}.bin`;
+  fs.writeFileSync(path.join(UPLOAD_DIR, file), C.encrypt(buf), { mode: 0o600 });
+  const id = Number(db.prepare('INSERT INTO uploads (contractor_id, label, mime, size, file, uploaded_by) VALUES (?,?,?,?,?,?)').run(c.id, 'Headshot', 'image/jpeg', buf.length, file, by).lastInsertRowid);
+  const status = by === 'admin' && body.approve ? 'approved' : 'pending';
+  db.prepare("UPDATE contractors SET headshot_upload_id = ?, headshot_status = ?, headshot_note = '', headshot_at = datetime('now') WHERE id = ?").run(id, status, c.id);
+  return status;
+}
+const initials = (n) => n.split(/\s+/).filter(Boolean).map((w) => w[0]).slice(0, 2).join('').toUpperCase().replace(/[^A-Z]/g, '');
+function avatarSvg(name) { // neutral generated placeholder: silhouette + initials, no real photo
+  const ini = initials(name) || '?';
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><rect width="256" height="256" fill="#3b4a22"/><circle cx="128" cy="100" r="50" fill="#56683a"/><path d="M38 256c8-56 46-86 90-86s82 30 90 86z" fill="#56683a"/><text x="128" y="118" font-family="Arial,Helvetica,sans-serif" font-size="46" font-weight="700" fill="#e8eadf" text-anchor="middle">${ini}</text></svg>`;
+}
+// ?approved=1 -> only an APPROVED photo (badge); otherwise admin sees pending too, contractor sees their own latest.
+app.get('/api/headshot/:cid', need(), (req, res) => {
+  const cid = idParam(req.params.cid);
+  if (req.user.role !== 'admin' && req.user.contractor_id !== cid) throw nf();
+  const c = getContractor(cid);
+  const onlyApproved = req.query.approved === '1';
+  res.set({ 'Cache-Control': 'private, max-age=60', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox", 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline' });
+  const u = c.headshot_upload_id && (!onlyApproved || c.headshot_status === 'approved') && c.headshot_status !== 'rejected' ? db.prepare('SELECT * FROM uploads WHERE id = ? AND contractor_id = ?').get(c.headshot_upload_id, c.id) : null;
+  if (!u) return res.type('image/svg+xml').send(avatarSvg(c.name));
+  res.type('image/jpeg').send(C.decrypt(fs.readFileSync(path.join(UPLOAD_DIR, u.file))));
+});
+function badge(c) {
+  const r = readiness(c); const t = fmtToday();
+  // Valid through: end of the current/next scheduled rotation, capped by the earliest expiring requirement; RED = not valid.
+  const exp = r.items.map((i) => i.document && i.document.expires).filter(Boolean).sort()[0];
+  let valid = r.rotation.end; if (exp && exp < valid) valid = exp;
+  const deployed = r.rotation.start <= t && r.rotation.end >= t;
+  return { contractor_id: c.id, name: (() => { const p = getProfile(c.id).personal || {}; return [p.legal_first, p.legal_middle, p.legal_last].filter(Boolean).join(' ') || c.name; })(),
+    title: titleName(c.title_id) || 'Contractor', employee_no: c.employee_no, status: r.status, site: destName(c.destination_id), site_label: deployed ? 'Current site' : 'Assigned site',
+    home_airport: c.home_airport, valid_through: r.status === 'red' ? null : valid, issued: t,
+    headshot_status: c.headshot_upload_id ? c.headshot_status : 'placeholder', headshot_note: c.headshot_note || '' };
+}
+app.get('/api/my/badge', need('contractor'), (req, res) => res.json(badge(me(req))));
+app.post('/api/my/headshot', need('contractor'), SEC.limit('headshot', 10, 60 * 60000, (r) => `u${r.user.id}`), (req, res) => {
+  const c = me(req); storeHeadshot(c, req.body, 'contractor');
+  audit(req, 'headshot_upload', c.name);
+  res.json({ ok: true, status: 'pending' });
+});
 function upsertDoc(cid, typeId, d) {
   db.prepare(`INSERT INTO documents (contractor_id, requirement_type_id, ref_last4, issued, expires, status, notes, verified, source, upload_id, check_status, provider, reference, updated_at)
     VALUES (@cid,@typeId,@ref_last4,@issued,@expires,@status,@notes,@verified,@source,@upload_id,@check_status,@provider,@reference,datetime('now'))
@@ -278,7 +397,7 @@ function syncProfileToDocs(cid, p) {
 const setting = (k, d) => { const v = db.meta.get(k); return v === undefined ? d : v; };
 const trackingCfg = () => ({ enabled: setting('tracking_enabled', DEMO_MODE ? '1' : '0') === '1', overdue_hours: Number(setting('tracking_overdue_hours', '12')),
   retention_days: Number(setting('tracking_retention_days', '30')), auto_minutes: 15 });
-function isDeployed(c) { const r = readiness(c).rotation; return r.days_to_deploy <= 0 && r.days_to_deploy > -r.on; }
+function isDeployed(c) { const r = readiness(c).rotation; const t = fmtToday(); return r.start <= t && r.end >= t; } // includes the travel-home day
 function purgeCheckins() { db.prepare("DELETE FROM checkins WHERE created_at < datetime('now', ?)").run(`-${trackingCfg().retention_days} days`); }
 purgeCheckins(); setInterval(purgeCheckins, 3600000).unref();
 const lastCheckin = (cid) => db.prepare("SELECT * FROM checkins WHERE contractor_id = ? AND kind != 'sos' ORDER BY created_at DESC, id DESC LIMIT 1").get(cid);
@@ -299,7 +418,7 @@ app.put('/api/my/tracking/consent', need('contractor'), (req, res) => {
   db.prepare("UPDATE contractors SET tracking_consent = ?, tracking_consent_at = CASE WHEN ? THEN datetime('now') ELSE tracking_consent_at END WHERE id = ?").run(on ? 1 : 0, on ? 1 : 0, req.user.contractor_id);
   audit(req, on ? 'tracking_consent_on' : 'tracking_consent_off', `contractor ${req.user.contractor_id}`); res.json({ ok: true });
 });
-app.post('/api/my/checkin', need('contractor'), (req, res) => {
+app.post('/api/my/checkin', need('contractor'), SEC.limit('checkin', 12, 10 * 60000, (r) => `u${r.user.id}`), (req, res) => {
   const c = me(req); const cfg = trackingCfg();
   if (!cfg.enabled) throw Object.assign(new Error('Check-in is turned off'), { status: 409 });
   if (!isDeployed(c)) throw Object.assign(new Error('Check-in is only active while you are deployed'), { status: 409 });
@@ -310,7 +429,7 @@ app.post('/api/my/checkin', need('contractor'), (req, res) => {
   res.json({ ok: true });
 });
 // SOS always works while deployed (even without location consent); location attached if the phone provides it.
-app.post('/api/my/sos', need('contractor'), (req, res) => {
+app.post('/api/my/sos', need('contractor'), SEC.limit('sos', 3, 10 * 60000, (r) => `u${r.user.id}`), (req, res) => {
   const c = me(req); const loc = readLoc(req.body || {});
   const note = V.str(req.body.message, 300, { name: 'Message' });
   const ck = Number(db.prepare("INSERT INTO checkins (contractor_id, kind, loc_enc) VALUES (?, 'sos', ?)").run(c.id, loc ? C.encJSON(loc) : null).lastInsertRowid);
@@ -330,18 +449,23 @@ admin.get('/contractors', (req, res) => {
       deploy_date: r.rotation.start, next_deploy: r.rotation.next_start, days_to_deploy: r.rotation.days_to_deploy, status: r.status, overridden: r.overridden,
       issues: r.items.filter((i) => i.status !== 'green').map((i) => ({ name: i.name, status: i.status })).concat(r.blockers.map((b) => ({ name: b.description, status: 'red' }))),
       fix_by: r.fix_by, passport_masked: mask(p.passport && p.passport.number), dob_masked: p.personal.dob ? `••••-••-${p.personal.dob.slice(-2)}` : '',
-      unverified: r.items.filter((i) => i.document && !i.document.verified).length, scenario: c.notes, home_airport: c.home_airport, alt_airport: c.alt_airport };
+      unverified: r.items.filter((i) => i.document && !i.document.verified).length, scenario: c.notes, home_airport: c.home_airport, alt_airport: c.alt_airport, title_id: c.title_id, title: titleName(c.title_id), headshot_status: c.headshot_upload_id ? c.headshot_status : null };
   });
   res.json({ contractors: list });
 });
 admin.get('/contractors/:id', (req, res) => {
   const c = getContractor(idParam(req.params.id));
   const acct = db.prepare('SELECT email FROM users WHERE contractor_id = ?').get(c.id);
-  res.json({ contractor: c, account_email: acct ? acct.email : null, readiness: readiness(c), profile: getProfile(c.id), uploads: listUploads(c.id),
+  res.json({ contractor: { ...c, title: titleName(c.title_id) }, account_email: acct ? acct.email : null, readiness: readiness(c), schedule: SCH.blocks(c.id), titles: activeTitles(), profile: getProfile(c.id), uploads: listUploads(c.id),
     flights: db.prepare('SELECT * FROM flights WHERE contractor_id = ? ORDER BY depart_at').all(c.id),
     alerts: db.prepare('SELECT * FROM alerts WHERE contractor_id = ? ORDER BY id DESC LIMIT 30').all(c.id),
     blockers: db.prepare('SELECT * FROM blockers WHERE contractor_id = ? ORDER BY id DESC').all(c.id) });
 });
+const activeTitles = () => db.prepare('SELECT * FROM titles WHERE active = 1 ORDER BY sort, name').all();
+function titleParam(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const id = idParam(v); if (!db.prepare('SELECT 1 FROM titles WHERE id = ? AND active = 1').get(id)) throw new V.VErr('Pick a title from the list'); return id;
+}
 function contractorFields(b) {
   const destination_id = b.destination_id ? idParam(b.destination_id) : null;
   if (destination_id && !db.prepare('SELECT 1 FROM destinations WHERE id = ?').get(destination_id)) throw new V.VErr('Unknown destination');
@@ -350,18 +474,26 @@ function contractorFields(b) {
     home_airport: V.str(b.home_airport, 3, { name: 'Home airport', pattern: /^[A-Za-z]{3}$/ }).toUpperCase(),
     alt_airport: V.str(b.alt_airport, 3, { name: 'Alternate airport', pattern: /^[A-Za-z]{3}$/ }).toUpperCase(),
     destination_id, deploy_date: V.date(b.deploy_date, { name: 'Deploy date' }), next_deploy_date: V.date(b.next_deploy_date, { name: 'Next deploy date' }),
-    rotation_on: V.int(b.rotation_on ?? 60, 1, 365, 'Days on'), rotation_off: V.int(b.rotation_off ?? 30, 0, 365, 'Days off'), notes: V.str(b.notes, 1000, { name: 'Notes' }) };
+    rotation_on: V.int(b.rotation_on ?? 60, 1, 365, 'Days on'), rotation_off: V.int(b.rotation_off ?? 30, 0, 365, 'Days off'), notes: V.str(b.notes, 1000, { name: 'Notes' }), title_id: titleParam(b.title_id) };
 }
 admin.post('/contractors', (req, res) => {
   const f = contractorFields(req.body);
-  const id = Number(db.prepare(`INSERT INTO contractors (name, employee_no, phone, email, home_airport, alt_airport, destination_id, deploy_date, next_deploy_date, rotation_on, rotation_off, notes)
-    VALUES (@name,@employee_no,@phone,@email,@home_airport,@alt_airport,@destination_id,@deploy_date,@next_deploy_date,@rotation_on,@rotation_off,@notes)`).run(f).lastInsertRowid);
+  const id = Number(db.prepare(`INSERT INTO contractors (name, employee_no, phone, email, home_airport, alt_airport, destination_id, deploy_date, next_deploy_date, rotation_on, rotation_off, notes, title_id)
+    VALUES (@name,@employee_no,@phone,@email,@home_airport,@alt_airport,@destination_id,@deploy_date,@next_deploy_date,@rotation_on,@rotation_off,@notes,@title_id)`).run(f).lastInsertRowid);
+  if (f.deploy_date) SCH.generate(id, f.deploy_date, f.rotation_on, f.rotation_off, f.destination_id, 3);
   audit(req, 'contractor_create', f.name); res.json({ ok: true, id });
 });
 admin.put('/contractors/:id', (req, res) => {
   const c = getContractor(idParam(req.params.id)); const f = contractorFields(req.body);
   db.prepare(`UPDATE contractors SET name=@name, employee_no=@employee_no, phone=@phone, email=@email, home_airport=@home_airport, alt_airport=@alt_airport, destination_id=@destination_id,
-    deploy_date=@deploy_date, next_deploy_date=@next_deploy_date, rotation_on=@rotation_on, rotation_off=@rotation_off, notes=@notes WHERE id=@id`).run({ ...f, id: c.id });
+    deploy_date=@deploy_date, next_deploy_date=@next_deploy_date, rotation_on=@rotation_on, rotation_off=@rotation_off, notes=@notes, title_id=@title_id WHERE id=@id`).run({ ...f, id: c.id });
+  // Rotation pattern / start / site changed -> re-lay the schedule from the new start and tell the contractor
+  if (f.deploy_date && (f.deploy_date !== c.deploy_date || f.rotation_on !== c.rotation_on || f.rotation_off !== c.rotation_off || f.destination_id !== c.destination_id)) {
+    SCH.generate(c.id, f.deploy_date, f.rotation_on, f.rotation_off, f.destination_id, 3);
+    sendAlert([c.id], 'info', 'Your schedule changed', `Rotation now starts ${f.deploy_date} (${f.rotation_on} on / ${f.rotation_off} off). Check My Schedule.`, req.user.email);
+    audit(req, 'schedule_regen', `${f.name} from ${f.deploy_date} ${f.rotation_on}/${f.rotation_off}`);
+  }
+  if (f.title_id !== c.title_id) audit(req, 'title_change', `${f.name}: ${titleName(c.title_id) || '—'} → ${titleName(f.title_id) || '—'}`);
   audit(req, 'contractor_update', f.name); res.json({ ok: true });
 });
 admin.delete('/contractors/:id', (req, res) => {
@@ -432,10 +564,11 @@ function flightFields(b) {
     from_airport: V.str(b.from_airport, 3, { required: true, name: 'From', pattern: /^[A-Za-z]{3}$/ }).toUpperCase(),
     to_airport: V.str(b.to_airport, 3, { required: true, name: 'To', pattern: /^[A-Za-z]{3}$/ }).toUpperCase(),
     depart_at: V.dt(b.depart_at, { required: true, name: 'Departure' }), arrive_at: V.dt(b.arrive_at, { name: 'Arrival' }),
-    confirmation: V.str(b.confirmation, 20, { name: 'Confirmation #' }), seat: V.str(b.seat, 8, { name: 'Seat' }), notes: V.str(b.notes, 500, { name: 'Notes' }) };
+    confirmation: V.str(b.confirmation, 20, { name: 'Confirmation #' }), seat: V.str(b.seat, 8, { name: 'Seat' }), notes: V.str(b.notes, 500, { name: 'Notes' }),
+    direction: V.str(b.direction, 8, { name: 'Direction', oneOf: ['outbound', 'return'] }) || null };
 }
-const insFlight = (cid, f) => db.prepare(`INSERT INTO flights (contractor_id, airline, flight_no, from_airport, to_airport, depart_at, arrive_at, confirmation, seat, notes)
-  VALUES (@cid,@airline,@flight_no,@from_airport,@to_airport,@depart_at,@arrive_at,@confirmation,@seat,@notes)`).run({ cid, ...f });
+const insFlight = (cid, f) => db.prepare(`INSERT INTO flights (contractor_id, airline, flight_no, from_airport, to_airport, depart_at, arrive_at, confirmation, seat, notes, direction)
+  VALUES (@cid,@airline,@flight_no,@from_airport,@to_airport,@depart_at,@arrive_at,@confirmation,@seat,@notes,@direction)`).run({ direction: null, ...f, cid });
 admin.post('/contractors/:id/flights', (req, res) => {
   const c = getContractor(idParam(req.params.id)); const f = flightFields(req.body);
   insFlight(c.id, f);
@@ -446,7 +579,7 @@ admin.put('/flights/:id', (req, res) => {
   const old = db.prepare('SELECT * FROM flights WHERE id = ?').get(idParam(req.params.id)); if (!old) throw nf();
   const f = flightFields(req.body);
   db.prepare(`UPDATE flights SET airline=@airline, flight_no=@flight_no, from_airport=@from_airport, to_airport=@to_airport, depart_at=@depart_at, arrive_at=@arrive_at,
-    confirmation=@confirmation, seat=@seat, notes=@notes, seen_at=NULL, updated_at=datetime('now') WHERE id=@id`).run({ ...f, id: old.id });
+    confirmation=@confirmation, seat=@seat, notes=@notes, direction=COALESCE(@direction, direction), seen_at=NULL, updated_at=datetime('now') WHERE id=@id`).run({ ...f, id: old.id });
   const changes = ['flight_no', 'from_airport', 'to_airport', 'depart_at', 'arrive_at', 'seat', 'confirmation'].filter((k) => (old[k] || '') !== (f[k] || ''))
     .map((k) => `${k.replace('_at', '').replace('_', ' ')}: ${old[k] || '—'} → ${f[k] || '—'}`.replace(/T(\d\d:\d\d)/g, ' $1'));
   sendAlert([old.contractor_id], 'flight', `Flight changed: ${f.flight_no}`, changes.length ? changes.join('; ') : 'Details updated — check the Flights tab.', req.user.email);
@@ -458,7 +591,7 @@ admin.delete('/flights/:id', (req, res) => {
   sendAlert([f.contractor_id], 'flight', `Flight cancelled: ${f.flight_no}`, `${f.from_airport}→${f.to_airport} on ${f.depart_at.replace('T', ' ')} was removed from your itinerary.`, req.user.email);
   audit(req, 'flight_delete', `${f.contractor_id} ${f.flight_no}`); res.json({ ok: true });
 });
-admin.post('/alerts', (req, res) => {
+admin.post('/alerts', SEC.limit('alerts', 30, 10 * 60000), (req, res) => {
   let ids;
   if (req.body.to === 'all') ids = db.prepare('SELECT id FROM contractors').all().map((r) => r.id);
   else if (['red', 'yellow', 'green'].includes(req.body.to)) ids = db.prepare('SELECT * FROM contractors').all().filter((c) => readiness(c).status === req.body.to).map((c) => c.id);
@@ -500,7 +633,7 @@ function saveRt(req, id) {
 }
 admin.post('/requirement-types', (req, res) => res.json({ ok: true, id: saveRt(req) }));
 admin.put('/requirement-types/:id', (req, res) => res.json({ ok: true, id: saveRt(req, idParam(req.params.id)) }));
-admin.post('/assistant/plan', (req, res) => {
+admin.post('/assistant/plan', SEC.limit('assistant', 60, 5 * 60000), (req, res) => {
   const text = V.str(req.body.text, 500, { required: true, name: 'Request' });
   audit(req, 'assistant_plan', text); res.json(assistant.plan(text));
 });
@@ -517,8 +650,11 @@ admin.post('/assistant/book', (req, res) => {
   const conf = `RT${C.token().replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 5)}`;
   fare.legs.forEach((l, i) => insFlight(c.id, { airline: l.airline, flight_no: l.flight_no, from_airport: l.from_airport, to_airport: l.to_airport,
     depart_at: l.depart_at || (i ? fare.legs[i - 1].arrive_at || fare.depart_at : fare.depart_at), arrive_at: l.arrive_at || null, confirmation: conf, seat: '',
-    notes: `Booked via FFD assistant · DEMO fare $${fare.price_usd}` }));
-  if (sim.destination.id !== c.destination_id || sim.depart_date !== c.deploy_date) db.prepare('UPDATE contractors SET destination_id = ?, deploy_date = ? WHERE id = ?').run(sim.destination.id, sim.depart_date, c.id);
+    notes: `Booked via FFD assistant · DEMO fare $${fare.price_usd}`, direction: 'outbound' }));
+  if (sim.destination.id !== c.destination_id || sim.depart_date !== c.deploy_date) {
+    db.prepare('UPDATE contractors SET destination_id = ?, deploy_date = ? WHERE id = ?').run(sim.destination.id, sim.depart_date, c.id);
+    SCH.generate(c.id, sim.depart_date, c.rotation_on, c.rotation_off, sim.destination.id, 3); // schedule follows the booking
+  }
   sendAlert([c.id], 'flight', `Travel booked: ${sim.destination.name}`, `${fare.airline} via ${fare.via}, departs ${fare.depart_at.replace('T', ' ')} · Conf ${conf}`, req.user.email);
   audit(req, 'assistant_book', `${c.name} → ${sim.destination.name} ${fare.airline} $${fare.price_usd} (prev status ${r.status})`);
   res.json({ ok: true, confirmation: conf });
@@ -526,8 +662,216 @@ admin.post('/assistant/book', (req, res) => {
 admin.get('/audit', (req, res) => res.json({ log: db.prepare('SELECT a.*, u.email FROM audit_log a LEFT JOIN users u ON u.id = a.user_id ORDER BY a.id DESC LIMIT 200').all() }));
 admin.post('/demo/reset', (req, res) => {
   if (!DEMO_MODE) return res.status(403).json({ error: 'Demo mode is off' });
-  for (const f of fs.readdirSync(UPLOAD_DIR)) fs.unlinkSync(path.join(UPLOAD_DIR, f));
-  seed(); res.set('Set-Cookie', 'ffd_sid=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0'); res.json({ ok: true });
+  const who = req.user.email;
+  resetDemo(`manual reset by ${who}`); res.set('Set-Cookie', clearCookie(req)); res.json({ ok: true });
+});
+// ---------------- Daily Deployment Report ----------------
+const addD = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+function flightDirection(f, c) {
+  if (f.direction) return f.direction;
+  const home = [c.home_airport, c.alt_airport].filter(Boolean);
+  if (home.includes(f.from_airport)) return 'outbound';
+  if (home.includes(f.to_airport)) return 'return';
+  return null;
+}
+function dailyReport(from, days) {
+  const to = addD(from, days - 1); const rows = []; const nowMs = Date.now();
+  for (const c of db.prepare('SELECT * FROM contractors ORDER BY name').all()) {
+    const r = readiness(c); const flights = db.prepare('SELECT * FROM flights WHERE contractor_id = ? ORDER BY depart_at').all(c.id);
+    // group flights into trips by confirmation (or by day when there is none), with a direction
+    const trips = new Map();
+    for (const f of flights) {
+      const key = f.confirmation || `${f.id}`; const t = trips.get(key) || { legs: [], dir: null }; t.legs.push(f); t.dir = t.dir || flightDirection(f, c); trips.set(key, t);
+    }
+    const tripList = [...trips.values()].map((t) => ({ ...t, dir: t.dir || 'outbound', date: t.legs[0].depart_at.slice(0, 10) }));
+    const events = [];
+    // scheduled rotation changes from the crew schedule (outbound on ON-block start, return on ON-block end)
+    for (const b of SCH.onBlocks(c.id)) for (const [date, dir] of [[b.start, 'outbound'], [b.end, 'return']]) {
+      if (date < from || date > to) continue;
+      const trip = tripList.find((t) => t.dir === dir && Math.abs(Date.parse(t.date) - Date.parse(date)) <= 2 * 86400000);
+      events.push({ date: trip ? trip.date : date, scheduled: date, dir, trip, dest_id: b.destination_id });
+    }
+    // booked trips in range that aren't tied to a scheduled change
+    for (const t of tripList) if (t.date >= from && t.date <= to && !events.some((e) => e.trip === t)) events.push({ date: t.date, scheduled: null, dir: t.dir, trip: t });
+    if (!events.length) continue;
+    const p = getProfile(c.id); const ec = (p.emergency_contacts || [])[0] || null;
+    for (const e of events) {
+      const dest = db.prepare('SELECT * FROM destinations WHERE id = ?').get(e.dest_id || c.destination_id || 0) || {};
+      const legs = e.trip ? e.trip.legs : [];
+      const flags = [];
+      if (r.status !== 'green') flags.push({ code: `status_${r.status}`, label: `${r.status.toUpperCase()} status traveling` });
+      if (!legs.length) flags.push({ code: 'no_flight', label: 'No flight booked for scheduled rotation change' });
+      const changed = legs.filter((l) => l.updated_at && nowMs - Date.parse(l.updated_at.replace(' ', 'T') + 'Z') < 86400000);
+      if (changed.length) flags.push({ code: 'changed_24h', label: `Flight change pushed in last 24h (${changed.map((l) => l.flight_no).join(', ')})` });
+      rows.push({ date: e.date, scheduled_rotation_date: e.scheduled, direction: e.dir, contractor: { id: c.id, name: c.name, employee_no: c.employee_no, title: titleName(c.title_id) },
+        status: r.status, destination: dest.name || '—', destination_airport: dest.airport || '', home_airport: c.home_airport || '', alt_airport: c.alt_airport || '',
+        emergency_contact: ec ? { name: ec.name, relationship: ec.relationship, phone: ec.phone, alt_phone: ec.alt_phone, email: ec.email } : null,
+        confirmation: legs[0] ? legs[0].confirmation : '', connections: legs.slice(0, -1).map((l) => l.to_airport),
+        legs: legs.map((l) => ({ airline: l.airline, flight_no: l.flight_no, from: l.from_airport, to: l.to_airport, depart_local: l.depart_at, arrive_local: l.arrive_at, seat: l.seat, confirmation: l.confirmation, changed_at: l.updated_at })),
+        flags });
+    }
+  }
+  rows.sort((a, b) => a.date.localeCompare(b.date) || a.direction.localeCompare(b.direction) || a.contractor.name.localeCompare(b.contractor.name));
+  const summary = { departing: rows.filter((x) => x.direction === 'outbound').length, returning: rows.filter((x) => x.direction === 'return').length,
+    flagged: rows.filter((x) => x.flags.length).length, red_traveling: rows.filter((x) => x.status === 'red').length, yellow_traveling: rows.filter((x) => x.status === 'yellow').length,
+    no_flight: rows.filter((x) => x.flags.some((f) => f.code === 'no_flight')).length, changed_24h: rows.filter((x) => x.flags.some((f) => f.code === 'changed_24h')).length };
+  return { from, to, days, generated_at: new Date().toISOString(), summary, rows };
+}
+function reportParams(req) {
+  const today = fmtToday();
+  const from = V.date(req.query.date, { name: 'date' }) || today;
+  const days = req.query.days === undefined ? 1 : V.int(req.query.days, 1, 31, 'days');
+  return { from, days };
+}
+const reportDaily = (req, res) => { const { from, days } = reportParams(req); audit(req, 'report_view', `${from} +${days}d${req.user.via === 'token' ? ' (report token)' : ''}`); res.json(dailyReport(from, days)); };
+admin.get('/reports/daily', reportDaily);
+// Read-only report token (for the 6am digest): Bearer token whose SHA-256 is in env REPORT_TOKEN_SHA256.
+// It is accepted ONLY on GET /api/admin/reports/daily; everything else still needs an admin session.
+// Lives in the environment, not the DB, so the nightly demo reseed can't invalidate it.
+app.get('/api/admin/reports/daily', SEC.limit('rtok', 120, 15 * 60000), (req, res, next) => {
+  const h = req.get('authorization') || '';
+  if (!/^Bearer /i.test(h)) return next();
+  const want = (process.env.REPORT_TOKEN_SHA256 || '').trim().toLowerCase();
+  const got = C.sha256(h.slice(7).trim());
+  if (!/^[0-9a-f]{64}$/.test(want) || !crypto.timingSafeEqual(Buffer.from(got, 'hex'), Buffer.from(want, 'hex'))) {
+    audit(req, 'report_token_rejected', ''); return res.status(401).json({ error: 'Invalid report token' });
+  }
+  req.user = { id: null, email: 'report-token', role: 'report', via: 'token' };
+  wrap(async () => reportDaily(req, res))(req, res, next);
+});
+admin.get('/reports/daily.csv', (req, res) => {
+  const { from, days } = reportParams(req); const rep = dailyReport(from, days);
+  // CSV-injection safe: cells starting with = + - @ are prefixed with '
+  const cell = (v) => { let t = String(v ?? ''); if (/^[=+\-@\t\r]/.test(t)) t = `'${t}`; return `"${t.replace(/"/g, '""')}"`; };
+  const lines = [['Date', 'Direction', 'Contractor', 'Employee #', 'Title', 'Status', 'Destination', 'Home airport', 'Alt airport', 'Confirmation', 'Itinerary', 'Seats', 'Connections', 'Flags', 'Emergency contact', 'EC phone'].map(cell).join(',')];
+  for (const x of rep.rows) lines.push([x.date, x.direction, x.contractor.name, x.contractor.employee_no, x.contractor.title, x.status, x.destination, x.home_airport, x.alt_airport, x.confirmation,
+    x.legs.map((l) => `${l.airline} ${l.flight_no} ${l.from} ${l.depart_local.replace('T', ' ')} -> ${l.to} ${String(l.arrive_local || '').replace('T', ' ')}`).join(' | ') || 'NO FLIGHT BOOKED',
+    x.legs.map((l) => l.seat).filter(Boolean).join(' / '), x.connections.join(' '), x.flags.map((f) => f.label).join('; '),
+    x.emergency_contact ? `${x.emergency_contact.name} (${x.emergency_contact.relationship})` : '', x.emergency_contact ? x.emergency_contact.phone : ''].map(cell).join(','));
+  audit(req, 'report_csv', `${from} +${days}d`);
+  res.set({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="ffd-deployment-report-${from}-${days}d.csv"` }).send('\ufeff' + lines.join('\r\n'));
+});
+admin.get('/contractors/:id/badge', (req, res) => res.json(badge(getContractor(idParam(req.params.id)))));
+admin.post('/contractors/:id/headshot', SEC.limit('headshot', 30, 60 * 60000), (req, res) => {
+  const c = getContractor(idParam(req.params.id)); const st = storeHeadshot(c, { ...req.body, approve: true }, 'admin');
+  audit(req, 'headshot_upload_admin', c.name); res.json({ ok: true, status: st });
+});
+admin.post('/contractors/:id/headshot/review', (req, res) => {
+  const c = getContractor(idParam(req.params.id));
+  if (!c.headshot_upload_id) throw new V.VErr('No headshot uploaded yet');
+  const decision = V.str(req.body.decision, 10, { required: true, name: 'Decision', oneOf: ['approved', 'rejected'] });
+  const note = V.str(req.body.note, 200, { name: 'Note' });
+  db.prepare('UPDATE contractors SET headshot_status = ?, headshot_note = ? WHERE id = ?').run(decision, note, c.id);
+  sendAlert([c.id], 'readiness', decision === 'approved' ? 'Headshot approved' : 'Headshot needs a retake', decision === 'approved' ? 'Your ID badge now shows your photo.' : `Please retake your headshot${note ? `: ${note}` : '.'}`, req.user.email);
+  audit(req, `headshot_${decision}`, `${c.name}${note ? `: ${note}` : ''}`); res.json({ ok: true });
+});
+// ---------------- Crew schedule ----------------
+admin.get('/schedule', (req, res) => {
+  const t = fmtToday();
+  const from = V.date(req.query.from, { name: 'from' }) || `${t.slice(0, 8)}01`;
+  const days = req.query.days === undefined ? 92 : V.int(req.query.days, 7, 186, 'days');
+  const to = SCH.plus(from, days - 1);
+  const titleF = req.query.title ? idParam(req.query.title) : null;
+  const cs = db.prepare('SELECT * FROM contractors ORDER BY name').all().filter((c) => !titleF || c.title_id === titleF);
+  const contractors = cs.map((c) => {
+    const r = readiness(c);
+    return { id: c.id, name: c.name, title: titleName(c.title_id), title_id: c.title_id, status: r.status, destination: destName(c.destination_id), rotation_on: c.rotation_on, rotation_off: c.rotation_off,
+      next_start: r.rotation.next_start, fix_by: r.fix_by,
+      blocks: db.prepare('SELECT * FROM schedule_blocks WHERE contractor_id = ? AND start <= ? AND end >= ? ORDER BY start').all(c.id, to, from) };
+  });
+  res.json({ from, to, days, today: t, contractors, destinations: db.prepare('SELECT id, name, min_headcount, max_headcount FROM destinations ORDER BY name').all(),
+    coverage: SCH.coverage(from, days), conflicts: SCH.conflicts(from, to, cs, readiness), titles: activeTitles() });
+});
+function blockFields(b) {
+  const kind = V.str(b.kind, 10, { required: true, name: 'Type', oneOf: SCH.KINDS });
+  const start = V.date(b.start, { name: 'Start', required: true }); const end = V.date(b.end, { name: 'End', required: true });
+  if (!start || !end) throw new V.VErr('Start and end dates are required');
+  if (end < start) throw new V.VErr('End date is before start date');
+  if ((Date.parse(end) - Date.parse(start)) / 86400000 > 366) throw new V.VErr('A block can be at most a year long');
+  const destination_id = kind === 'on' ? (b.destination_id ? idParam(b.destination_id) : null) : null;
+  if (kind === 'on' && !destination_id) throw new V.VErr('Pick the site for an ON rotation');
+  if (destination_id && !db.prepare('SELECT 1 FROM destinations WHERE id = ?').get(destination_id)) throw new V.VErr('Unknown site');
+  return { kind, start, end, destination_id, notes: V.str(b.notes, 300, { name: 'Notes' }) };
+}
+function checkOverlap(cid, f, selfId) {
+  if (f.kind !== 'on') return;
+  const clash = db.prepare("SELECT * FROM schedule_blocks WHERE contractor_id = ? AND kind = 'on' AND id != ? AND start <= ? AND end >= ?").get(cid, selfId || 0, f.end, f.start);
+  if (clash) throw new V.VErr(`Overlaps another ON rotation (${clash.start} → ${clash.end})`);
+}
+const KIND_LABEL = { on: 'ON rotation', off: 'OFF', travel: 'Travel', training: 'Training', leave: 'Leave' };
+function scheduleChanged(req, cid, verb, f, before) {
+  SCH.sync(cid);
+  const c = getContractor(cid);
+  const what = `${KIND_LABEL[f.kind]}${f.destination_id ? ` at ${destName(f.destination_id)}` : ''} ${f.start} → ${f.end}`;
+  audit(req, `schedule_${verb}`, `${c.name}: ${what}${before ? ` (was ${before.start} → ${before.end})` : ''}`);
+  sendAlert([cid], 'info', `Schedule ${verb === 'delete' ? 'change' : 'update'}: ${KIND_LABEL[f.kind]}`,
+    `${verb === 'delete' ? 'Removed' : verb === 'create' ? 'Added' : 'Now'}: ${what}. Open My Schedule for details.`, req.user.email);
+}
+admin.post('/schedule/blocks', (req, res) => {
+  const c = getContractor(idParam(req.body.contractor_id)); const f = blockFields(req.body); checkOverlap(c.id, f);
+  const id = Number(db.prepare('INSERT INTO schedule_blocks (contractor_id, kind, start, end, destination_id, notes) VALUES (?,?,?,?,?,?)').run(c.id, f.kind, f.start, f.end, f.destination_id, f.notes).lastInsertRowid);
+  scheduleChanged(req, c.id, 'create', f); res.json({ ok: true, id });
+});
+admin.put('/schedule/blocks/:id', (req, res) => {
+  const b = db.prepare('SELECT * FROM schedule_blocks WHERE id = ?').get(idParam(req.params.id)); if (!b) throw nf();
+  const f = blockFields({ ...b, ...req.body }); checkOverlap(b.contractor_id, f, b.id);
+  db.prepare("UPDATE schedule_blocks SET kind=?, start=?, end=?, destination_id=?, notes=?, updated_at=datetime('now') WHERE id=?").run(f.kind, f.start, f.end, f.destination_id, f.notes, b.id);
+  scheduleChanged(req, b.contractor_id, 'update', f, b); res.json({ ok: true });
+});
+admin.delete('/schedule/blocks/:id', (req, res) => {
+  const b = db.prepare('SELECT * FROM schedule_blocks WHERE id = ?').get(idParam(req.params.id)); if (!b) throw nf();
+  db.prepare('DELETE FROM schedule_blocks WHERE id = ?').run(b.id);
+  scheduleChanged(req, b.contractor_id, 'delete', b); res.json({ ok: true });
+});
+admin.post('/contractors/:id/schedule/generate', (req, res) => {
+  const c = getContractor(idParam(req.params.id));
+  const start = V.date(req.body.start, { name: 'Start', required: true }); if (!start) throw new V.VErr('Start date is required');
+  const on = V.int(req.body.on ?? c.rotation_on, 1, 365, 'Days on'); const off = V.int(req.body.off ?? c.rotation_off, 0, 365, 'Days off');
+  const cycles = V.int(req.body.cycles ?? 3, 1, 8, 'Cycles');
+  const dest = req.body.destination_id ? idParam(req.body.destination_id) : c.destination_id;
+  if (!dest || !db.prepare('SELECT 1 FROM destinations WHERE id = ?').get(dest)) throw new V.VErr('Pick the site');
+  db.prepare('UPDATE contractors SET rotation_on = ?, rotation_off = ? WHERE id = ?').run(on, off, c.id);
+  SCH.generate(c.id, start, on, off, dest, cycles);
+  audit(req, 'schedule_generate', `${c.name}: ${cycles}× ${on} on / ${off} off from ${start} at ${destName(dest)}`);
+  sendAlert([c.id], 'info', 'Your schedule changed', `New rotation plan: ${on} on / ${off} off starting ${start} at ${destName(dest)}. Open My Schedule.`, req.user.email);
+  res.json({ ok: true });
+});
+admin.put('/destinations/:id/targets', (req, res) => {
+  const d = db.prepare('SELECT * FROM destinations WHERE id = ?').get(idParam(req.params.id)); if (!d) throw nf();
+  const min = V.int(req.body.min ?? 0, 0, 500, 'Minimum headcount');
+  const max = req.body.max === '' || req.body.max === null || req.body.max === undefined ? null : V.int(req.body.max, 1, 500, 'Maximum headcount');
+  if (max !== null && max < min) throw new V.VErr('Maximum is below minimum');
+  db.prepare('UPDATE destinations SET min_headcount = ?, max_headcount = ? WHERE id = ?').run(min, max, d.id);
+  audit(req, 'coverage_targets', `${d.name}: min ${min} max ${max ?? '—'}`); res.json({ ok: true });
+});
+// ---------------- Titles ----------------
+admin.get('/titles', (req, res) => res.json({ titles: db.prepare('SELECT t.*, (SELECT COUNT(*) FROM contractors c WHERE c.title_id = t.id) AS in_use FROM titles t ORDER BY sort, name').all() }));
+admin.post('/titles', (req, res) => {
+  const name = V.str(req.body.name, 80, { required: true, name: 'Title' });
+  if (db.prepare('SELECT 1 FROM titles WHERE lower(name) = lower(?)').get(name)) throw new V.VErr('That title already exists');
+  const sort = (db.prepare('SELECT MAX(sort) m FROM titles').get().m ?? -1) + 1;
+  const id = Number(db.prepare('INSERT INTO titles (name, sort) VALUES (?,?)').run(name, sort).lastInsertRowid);
+  audit(req, 'title_create', name); res.json({ ok: true, id });
+});
+admin.put('/titles/:id', (req, res) => {
+  const t = db.prepare('SELECT * FROM titles WHERE id = ?').get(idParam(req.params.id)); if (!t) throw nf();
+  const name = req.body.name === undefined ? t.name : V.str(req.body.name, 80, { required: true, name: 'Title' });
+  if (db.prepare('SELECT 1 FROM titles WHERE lower(name) = lower(?) AND id != ?').get(name, t.id)) throw new V.VErr('That title already exists');
+  const active = req.body.active === undefined ? t.active : req.body.active ? 1 : 0;
+  db.prepare('UPDATE titles SET name = ?, active = ? WHERE id = ?').run(name, active, t.id);
+  audit(req, 'title_update', `${t.name}${name !== t.name ? ` → ${name}` : ''}${active !== t.active ? (active ? ' (reactivated)' : ' (deactivated)') : ''}`); res.json({ ok: true });
+});
+admin.delete('/titles/:id', (req, res) => {
+  const t = db.prepare('SELECT * FROM titles WHERE id = ?').get(idParam(req.params.id)); if (!t) throw nf();
+  if (db.prepare('SELECT COUNT(*) n FROM contractors WHERE title_id = ?').get(t.id).n) throw new V.VErr('Title is in use — deactivate it instead');
+  db.prepare('DELETE FROM titles WHERE id = ?').run(t.id); audit(req, 'title_delete', t.name); res.json({ ok: true });
+});
+admin.put('/titles-order', (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.slice(0, 200).map(idParam) : [];
+  const all = db.prepare('SELECT id FROM titles').all().map((r) => r.id);
+  if (ids.length !== all.length || !all.every((i) => ids.includes(i))) throw new V.VErr('Send every title id once');
+  db.exec('BEGIN'); try { ids.forEach((id, k) => db.prepare('UPDATE titles SET sort = ? WHERE id = ?').run(k, id)); db.exec('COMMIT'); } catch (e) { db.exec('ROLLBACK'); throw e; }
+  audit(req, 'title_reorder', ids.join(',')); res.json({ ok: true });
 });
 admin.get('/settings', (req, res) => res.json({ tracking: trackingCfg() }));
 admin.put('/settings', (req, res) => {
@@ -558,10 +902,18 @@ admin.post('/sos/:id/ack', (req, res) => {
 app.use('/api/admin', admin);
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
-app.use(express.static(path.join(__dirname, '..', 'public'), { extensions: ['html'], setHeaders: (res, p) => { if (p.endsWith('sw.js')) res.set('Cache-Control', 'no-cache'); } }));
+app.use(express.static(path.join(__dirname, '..', 'public'), { extensions: ['html'], dotfiles: 'deny', index: 'index.html', setHeaders: (res, p) => { if (p.endsWith('sw.js')) res.set('Cache-Control', 'no-cache'); } }));
+app.use((req, res) => res.status(404).type('text/plain').send('Not found'));
 app.use((err, req, res, next) => {
-  const status = err.status || (err.type === 'entity.too.large' ? 413 : 500);
-  if (status === 500) console.error(err);
-  res.status(status).json({ error: status === 500 ? 'Something went wrong' : err.message });
+  const status = err.status || err.statusCode || 500;
+  if (status >= 500) console.error(err);
+  let msg = err.message;
+  if (err.type === 'entity.too.large') msg = 'Request too large';
+  else if (err.type) msg = 'Invalid request body'; // body-parser errors: don't echo parser internals
+  if (status >= 500) msg = 'Something went wrong';
+  res.status(status).json({ error: msg });
 });
-app.listen(PORT, () => console.log(`FFD running on http://localhost:${PORT} (demo mode ${DEMO_MODE ? 'on' : 'off'})`));
+process.on('unhandledRejection', (e) => console.error('unhandledRejection', e));
+process.on('uncaughtException', (e) => { console.error('uncaughtException — exiting so the platform restarts us', e); process.exit(1); });
+const server = app.listen(PORT, () => console.log(`FFD running on http://localhost:${PORT} (demo mode ${DEMO_MODE ? 'on' : 'off'})`));
+server.headersTimeout = 20000; server.requestTimeout = 30000; server.keepAliveTimeout = 65000;

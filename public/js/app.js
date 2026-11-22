@@ -41,9 +41,23 @@ function badges() {
   const set = (id, n) => { const b = $(id); b.textContent = n; b.classList.toggle('hidden', !n); };
   set('#bellN', S.unread_alerts); set('#alN', S.unread_alerts); set('#flN', S.new_flights);
 }
+let HS_V = Date.now();
+async function uploadHeadshot(data) { await api('POST', '/api/my/headshot', { data }); HS_V = Date.now(); toast('📸 Headshot sent — waiting for office approval'); render(); }
+async function renderSchedule() {
+  const d = await api('GET', '/api/my/schedule'); const KL = { on: 'ON rotation', off: 'OFF — home', travel: 'Travel day', training: 'Training', leave: 'Leave' }; const IC = { on: '🛠️', off: '🏠', travel: '✈️', training: '🎓', leave: '🌴' };
+  const fl = Object.fromEntries(d.flights.map((f) => [f.id, f]));
+  const fh = (ids) => ids.map((id) => fl[id]).map((f) => `<div class="small">✈️ <b>${esc(f.airline)} ${esc(f.flight_no)}</b> ${esc(f.from_airport)} → ${esc(f.to_airport)} · ${fdt(f.depart_at)} · Conf ${esc(f.confirmation || '—')}</div>`).join('');
+  const up = d.blocks.filter((b) => b.end >= d.today);
+  $('#view').innerHTML = `<div class="section"><div class="row"><h2>🗓️ My schedule</h2><a class="btn sm right" href="/api/my/schedule.ics" download>📅 Add to calendar (.ics)</a></div>
+    <p class="small mut">Pattern ${d.pattern.on} on / ${d.pattern.off} off. Changes from the office show up here and in your alerts.</p>
+    ${up.map((b) => `<div class="card mt sched ${b.kind}"><div class="row"><span>${IC[b.kind]}</span><b>${KL[b.kind]}</b>${b.start <= d.today ? '<span class="pill green">Now</span>' : ''}<span class="right small mut">${Math.round((Date.parse(b.end) - Date.parse(b.start)) / 86400000) + 1} days</span></div>
+      <div class="val mt">${fdate(b.start)} → ${fdate(b.end)}</div>${b.site ? `<div class="small mut">📍 ${esc(b.site)}</div>` : ''}${b.notes ? `<div class="small">${esc(b.notes)}</div>` : ''}
+      ${b.kind === 'on' ? `<div class="mt"><div class="small"><b>Travel out:</b> ${fdate(b.travel_out)}</div>${fh(b.flights_out) || '<div class="small mut">No flights booked yet</div>'}
+        <div class="small mt"><b>Travel home:</b> ${fdate(b.travel_home)}</div>${fh(b.flights_home) || '<div class="small mut">No flights booked yet</div>'}</div>` : ''}</div>`).join('') || '<p class="mut">Nothing scheduled yet.</p>'}</div>`;
+}
 function render() {
   $$('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
-  ({ status: renderStatus, flights: renderFlights, alerts: renderAlerts, profile: renderProfile })[tab]();
+  ({ status: renderStatus, flights: renderFlights, alerts: renderAlerts, profile: renderProfile, schedule: renderSchedule })[tab]();
   window.scrollTo(0, 0);
 }
 function renderStatus() {
@@ -66,6 +80,9 @@ function renderStatus() {
       <div class="card"><div class="lbl">${dtd > 0 ? `Deploys in ${dtd} days` : dtd > -r.rotation.on ? 'On rotation now' : 'This rotation'}</div><div class="val">${fdate(r.rotation.start)}</div><div class="small mut">Home ${fdate(r.rotation.end)}</div></div>
       <div class="card"><div class="lbl">Next rotation</div><div class="val">${fdate(r.rotation.next_start)}</div><div class="small mut">${r.rotation.on} on / ${r.rotation.off} off</div></div>
     </div>
+    <div class="card mt" id="badgeCard"><div class="row"><h2>🪪 My ID badge</h2><button class="btn sm right" id="hsBtn">📸 Headshot</button></div>
+      <canvas id="bcv" class="badge-cv mt"></canvas><div class="row mt" data-style="justify-content:center"><button class="btn sm" id="bPng">⬇️ PNG</button><button class="btn sm" id="bPdf">⬇️ PDF</button><button class="btn sm" data-go="schedule">🗓️ My schedule</button></div>
+      <p class="small mut center" id="bNote"></p></div>
     ${trackingCard()}
     <div class="card mt"><div class="row"><h2>Requirements</h2><span class="right small mut">📍 ${esc(S.contractor.destination)}</span></div>
       <div class="mt">${r.items.map((i) => `<div class="req ${i.status}"><span class="dot ${i.status}"></span><div class="grow">
@@ -77,6 +94,12 @@ function renderStatus() {
       ${(() => { const f = S.flights.find((x) => x.depart_at.slice(0, 10) >= new Date().toISOString().slice(0, 10)) || S.flights[0]; return `<div class="flight mt"><div class="small mut">${esc(f.airline)} · ${esc(f.flight_no)}</div><div class="route">${esc(f.from_airport)}<span class="line"></span>${esc(f.to_airport)}</div><div class="small">${fdt(f.depart_at)} · Conf <b>${esc(f.confirmation)}</b></div></div>`; })()}</div>` : ''}
   </div>`;
   $('#banner')?.addEventListener('click', () => go('alerts'));
+  api('GET', '/api/my/badge').then(async (b) => {
+    if (!$('#bcv')) return; b.v = HS_V; await drawBadge($('#bcv'), b);
+    $('#bNote').textContent = b.headshot_status === 'pending' ? 'Your new photo is waiting for office approval.' : b.headshot_status === 'rejected' ? `Photo needs a retake${b.headshot_note ? `: ${b.headshot_note}` : ''}.` : b.headshot_status === 'placeholder' ? 'Add a headshot so your badge shows your photo.' : '';
+    $('#bPng').onclick = () => badgePng($('#bcv'), b); $('#bPdf').onclick = () => badgePdf($('#bcv'), b);
+  }).catch(() => {});
+  $('#hsBtn').addEventListener('click', () => headshotPicker(uploadHeadshot));
   $('#trkC')?.addEventListener('change', (e) => { if (e.target.checked) { e.target.checked = false; consentModal(load); } else guard(async () => { await api('PUT', '/api/my/tracking/consent', { consent: false }); toast('Location sharing off'); load(); }); });
   $('#trkIn')?.addEventListener('click', () => guard(async () => { const pos = await getPos(); await api('POST', '/api/my/checkin', { ...(pos || {}), kind: 'checkin' }); toast(pos ? '✅ Checked in with location' : '✅ Checked in (location unavailable)'); load(); }));
   $('#sos')?.addEventListener('click', () => modal(`<h2>🆘 Send SOS?</h2><p>This immediately alerts the deployment office with your location.</p><label for="sosM">Message (optional)</label><input id="sosM" placeholder="What's happening?">
@@ -117,8 +140,10 @@ async function enablePush() {
   });
 }
 async function renderProfile() {
-  const { profile, uploads } = await api('GET', '/api/my/profile');
+  const { profile, uploads, titles, title_id } = await api('GET', '/api/my/profile');
   $('#view').innerHTML = `<div class="section"><h2>My information</h2><p class="small mut">Keep this current. Passport, visa, ID, shot and clearance details you enter here update your readiness automatically (marked self-reported until the office verifies).</p>
+    <div class="card mb"><div class="row"><img class="av lg" src="/api/headshot/${S.contractor.id}?v=${HS_V}" alt=""><div><b>Headshot</b><div class="small mut">For your ID badge. Plain background, face centered. The office approves it.</div></div><button class="btn sm right" id="hsBtn2">📸 Take / upload</button></div>
+      <label for="myTitle" class="mt">Title / role</label><select id="myTitle"><option value="">— Select your title —</option>${titles.map((t) => `<option value="${t.id}" ${t.id === title_id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select></div>
     <div id="pf"></div>
     <details class="sec"><summary><span>📎</span>Document photos (${uploads.length})</summary><div class="body">
       ${uploads.map((u) => `<div class="row small mt"><span>📄</span><a href="/api/uploads/${u.id}" target="_blank" rel="noopener">${esc(u.label)}</a><span class="mut right">${Math.round(u.size / 1024)} KB</span></div>`).join('') || '<p class="small mut">None yet.</p>'}
@@ -128,9 +153,10 @@ async function renderProfile() {
     <div class="sticky-save"><button class="btn pri block" id="save">Save my information</button></div></div>`;
   const form = renderProfileForm($('#pf'), profile, { open: 'personal', uploadUrl: '/api/my/uploads' });
   $('#save').addEventListener('click', () => guard(async () => {
-    const r = await api('PUT', '/api/my/profile', { profile: form.collect() });
+    const r = await api('PUT', '/api/my/profile', { profile: form.collect(), title_id: $('#myTitle').value || null });
     toast(r.synced.length ? `Saved · updated ${r.synced.join(', ')}` : 'Saved'); await load(); tab = 'profile';
   }));
+  $('#hsBtn2').addEventListener('click', () => headshotPicker(async (data) => { await uploadHeadshot(data); tab = 'profile'; render(); }));
   $('#upBtn').addEventListener('click', () => guard(async () => {
     const f = $('#upFile').files[0]; if (!f) throw new Error('Choose a file');
     await api('POST', '/api/my/uploads', await fileToPayload(f, $('#upLabel').value || f.name)); toast('Uploaded'); renderProfile();
