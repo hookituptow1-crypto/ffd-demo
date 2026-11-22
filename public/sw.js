@@ -1,6 +1,6 @@
 // Service worker: caches only the static shell (never API data / personal info) and shows push alerts.
-const CACHE = 'ffd-shell-v1';
-const SHELL = ['/', '/app.html', '/css/styles.css', '/js/common.js', '/js/brand.js', '/js/app.js', '/icons/logo.png'];
+const CACHE = 'ffd-shell-v2';
+const SHELL = ['/', '/app.html', '/css/styles.css', '/js/common.js', '/js/brand.js', '/js/airports.js', '/js/app.js', '/icons/logo.png'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener('activate', (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k))))); self.clients.claim(); });
 self.addEventListener('fetch', (e) => {

@@ -24,7 +24,9 @@ function int(v, min, max, name) {
 
 // Profile schema: 's' string(max) | 'd' date | {obj} | [schema, maxItems]
 const S = (n) => ['s', n], D = ['d'];
+const IATA = ['s', 3, null, /^[A-Za-z]{3}$/];
 const PROFILE = {
+  travel: { home_airport: IATA, alt_airport: IATA },
   personal: { legal_first: S(80), legal_middle: S(80), legal_last: S(80), preferred_name: S(80), dob: D,
     place_of_birth: S(120), citizenship: S(80), second_citizenship: S(80), gender: S(30), phone: S(40), email: S(120),
     address: { line1: S(160), line2: S(160), city: S(80), state: S(80), postal: S(20), country: S(80) } },
@@ -40,7 +42,7 @@ const PROFILE = {
 };
 
 function apply(schema, v, name) {
-  if (Array.isArray(schema) && schema[0] === 's') return str(v, schema[1], { name, oneOf: schema[2] });
+  if (Array.isArray(schema) && schema[0] === 's') { const out = str(v, schema[1], { name, oneOf: schema[2] || undefined, pattern: schema[3] }); return schema[3] ? out.toUpperCase() : out; }
   if (Array.isArray(schema) && schema[0] === 'd') return date(v, { name });
   if (Array.isArray(schema)) {
     const arr = Array.isArray(v) ? v : [];

@@ -102,6 +102,7 @@ async function renderProfile() {
 }
 function fixModal(typeId) {
   const i = S.readiness.items.find((x) => x.requirement_type_id === typeId);
+  if (i.is_check) return checkSubmit(i);
   modal(`<div class="row"><h2>${esc(i.name)}</h2><button class="btn sm right" data-close>✕</button></div>
     <p class="small mut">${esc(i.instructions || '')}</p>
     <div class="grid2"><div><label for="mNum">Document / card number</label><input id="mNum" autocomplete="off"></div>
@@ -114,6 +115,24 @@ function fixModal(typeId) {
       const body = { number: $('#mNum', m).value, issued: $('#mIss', m).value, expires: $('#mExp', m)?.value || '', file: f ? await fileToPayload(f, i.name) : undefined };
       const r = await api('POST', `/api/my/requirements/${typeId}`, body); close();
       toast(r.readiness.status === 'green' ? '✅ CLEARED TO DEPLOY' : 'Submitted'); await load();
+    }));
+  });
+}
+function checkSubmit(i) {
+  const doc = i.document || {};
+  modal(`<div class="row"><h2>🛡️ ${esc(i.name)}</h2><button class="btn sm right" data-close>✕</button></div>
+    <p class="small mut">${esc(i.instructions || '')}</p>
+    ${doc.check_status ? `<p>Current status: <b>${esc(doc.check_status.replace('_', ' '))}</b>${doc.expires ? ` · valid until ${fdate(doc.expires)}` : ''}</p>` : ''}
+    <div class="grid2"><div><label for="kP">Provider</label><input id="kP" value="${esc(doc.provider)}" placeholder="e.g. Sterling"></div>
+    <div><label for="kR">Reference #</label><input id="kR" value="${esc(doc.reference)}"></div>
+    <div><label for="kC">Completion date</label><input id="kC" type="date"></div></div>
+    <label for="kF">Upload report (stored encrypted)</label><input id="kF" type="file" accept="image/jpeg,image/png,image/webp,application/pdf">
+    <p class="small mut">The deployment office reviews and marks it cleared.</p>
+    <button class="btn pri block mt" id="kSave">Submit for review</button>`, (m, close) => {
+    $('#kSave', m).addEventListener('click', () => guard(async () => {
+      const f = $('#kF', m).files[0];
+      await api('POST', `/api/my/requirements/${i.requirement_type_id}`, { provider: $('#kP', m).value, reference: $('#kR', m).value, issued: $('#kC', m).value, file: f ? await fileToPayload(f, i.name) : undefined });
+      close(); toast('Submitted for review'); await load();
     }));
   });
 }

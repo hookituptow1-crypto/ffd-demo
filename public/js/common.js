@@ -44,7 +44,33 @@ function fileToPayload(file, label) {
 async function logout() { await api('POST', '/api/logout').catch(() => {}); location.href = '/'; }
 
 // ---- Intake / profile form (shared by contractor + admin) ----
+// ---- Airport type-ahead picker: <input data-airport> ; matches IATA code, city or airport name ----
+function airportLabel(code) { const a = (window.AIRPORTS || []).find((x) => x[0] === code); return a ? `${a[0]} — ${a[1]}` : (code || ''); }
+function attachAirportPickers(root) {
+  $$('input[data-airport]', root).forEach((inp) => {
+    if (inp.dataset.ready) return; inp.dataset.ready = '1';
+    const wrap = document.createElement('div'); wrap.className = 'ap-wrap'; inp.parentNode.insertBefore(wrap, inp); wrap.appendChild(inp);
+    const list = document.createElement('div'); list.className = 'ap-list hidden'; wrap.appendChild(list);
+    const hidden = document.createElement('input'); hidden.type = 'hidden'; wrap.appendChild(hidden);
+    // the visible input shows "MEM — Memphis, TN"; the code lives in data-code and in the field value used by forms
+    inp.dataset.code = (inp.value || '').slice(0, 3).toUpperCase(); inp.value = airportLabel(inp.dataset.code);
+    const show = () => {
+      const q = inp.value.trim().toLowerCase(); if (!q) { list.classList.add('hidden'); return; }
+      const hits = window.AIRPORTS.filter((a) => a[0].toLowerCase().startsWith(q) || a[1].toLowerCase().includes(q) || a[2].toLowerCase().includes(q))
+        .sort((a, b) => (b[0].toLowerCase() === q) - (a[0].toLowerCase() === q)).slice(0, 8);
+      list.innerHTML = hits.map((a) => `<button type="button" data-code="${a[0]}"><b>${a[0]}</b> ${esc(a[1])} <span class="mut">· ${esc(a[2])}</span></button>`).join('') || '<div class="small mut">No match — type a 3-letter code</div>';
+      list.classList.remove('hidden');
+    };
+    inp.addEventListener('input', () => { const v = inp.value.trim(); inp.dataset.code = /^[A-Za-z]{3}$/.test(v) ? v.toUpperCase() : ''; if (!v) inp.dataset.code = ''; show(); });
+    inp.addEventListener('focus', () => inp.select());
+    inp.addEventListener('blur', () => setTimeout(() => { list.classList.add('hidden'); inp.value = airportLabel(inp.dataset.code); }, 150));
+    list.addEventListener('mousedown', (e) => { const b = e.target.closest('[data-code]'); if (!b) return; e.preventDefault(); inp.dataset.code = b.dataset.code; inp.value = airportLabel(b.dataset.code); list.classList.add('hidden'); });
+  });
+}
+const airportVal = (inp) => (inp && inp.dataset.code) || '';
+
 const PROFILE_FORM = [
+  { key: 'travel', title: 'Home / preferred airport', icon: '🛫', fields: [['home_airport', 'Primary home airport', 'airport'], ['alt_airport', 'Alternate airport (optional)', 'airport']] },
   { key: 'personal', title: 'Personal information', icon: '🪪', fields: [['legal_first', 'Legal first name'], ['legal_middle', 'Middle name'], ['legal_last', 'Legal last name'],
     ['preferred_name', 'Preferred name'], ['dob', 'Date of birth', 'date', true], ['place_of_birth', 'Place of birth'], ['citizenship', 'Citizenship'],
     ['second_citizenship', 'Second citizenship'], ['gender', 'Gender', ['', 'Male', 'Female', 'Other', 'Prefer not to say']], ['phone', 'Phone', 'tel'], ['email', 'Email', 'email']],
@@ -64,6 +90,7 @@ function fieldHtml(path, [k, label, type = 'text', sensitive], val) {
   const name = `${path}.${k}`;
   let input;
   if (Array.isArray(type)) input = `<select id="${id}" data-f="${esc(name)}">${type.map((o) => `<option ${o === val ? 'selected' : ''} value="${esc(o)}">${esc(o || '—')}</option>`).join('')}</select>`;
+  else if (type === 'airport') input = `<input id="${id}" data-f="${esc(name)}" data-airport value="${esc(val)}" placeholder="Type code or city, e.g. MEM or Memphis" autocomplete="off">`;
   else if (type === 'textarea') input = `<textarea id="${id}" rows="2" data-f="${esc(name)}">${esc(val)}</textarea>`;
   else input = `<input id="${id}" type="${type}" data-f="${esc(name)}" value="${esc(val)}" ${sensitive ? 'autocomplete="off"' : ''}>`;
   return `<div><label for="${id}">${esc(label)}${sensitive ? ' 🔒' : ''}</label>${input}</div>`;
@@ -89,7 +116,7 @@ function renderProfileForm(el, profile, { open } = {}) {
     $$('[data-f]', el).forEach((inp) => {
       const parts = inp.dataset.f.split('.'); let o = p;
       for (let i = 0; i < parts.length - 1; i++) { const k = /^\d+$/.test(parts[i]) ? +parts[i] : parts[i]; o[k] = o[k] || {}; o = o[k]; }
-      o[parts[parts.length - 1]] = inp.value;
+      o[parts[parts.length - 1]] = inp.hasAttribute('data-airport') ? airportVal(inp) : inp.value;
     });
     return p;
   };
@@ -99,9 +126,11 @@ function renderProfileForm(el, profile, { open } = {}) {
     collect(); const openSecs = $$('details[open]', el).map((d) => d.dataset.sec);
     if (add) p[add.dataset.add].push({});
     if (del) { const [k, i] = del.dataset.del.split(':'); p[k].splice(+i, 1); }
-    draw(); openSecs.forEach((s) => { const d = $(`details[data-sec="${s}"]`, el); if (d) d.open = true; });
+    draw(); attachAirportPickers(el); openSecs.forEach((s) => { const d = $(`details[data-sec="${s}"]`, el); if (d) d.open = true; });
   });
-  draw();
+  const draw0 = draw;
+  const drawAll = () => { draw0(); attachAirportPickers(el); };
+  drawAll();
   return { collect };
 }
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

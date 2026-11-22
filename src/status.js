@@ -41,8 +41,15 @@ function evaluate(contractor, requirements, documents, blockers) {
     const base = { requirement_type_id: req.id, name: req.name, category: req.category,
       instructions: req.instructions, has_expiry: !!req.has_expiry, min_validity_days: req.min_validity_days,
       document: doc ? { id: doc.id, ref_last4: doc.ref_last4, issued: doc.issued, expires: doc.expires,
-        status: doc.status, notes: doc.notes, verified: !!doc.verified, source: doc.source, upload_id: doc.upload_id } : null };
-    if (!doc) return { ...base, status: 'red', message: 'Missing — required for this destination' };
+        status: doc.status, notes: doc.notes, verified: !!doc.verified, source: doc.source, upload_id: doc.upload_id, check_status: doc.check_status || null,
+        provider: doc.provider || '', reference: doc.reference || '' } : null, is_check: !!req.is_check, validity_days: req.validity_days || 0 };
+    if (!doc) return { ...base, status: 'red', message: req.is_check ? 'Not started — required for every deployment' : 'Missing — required for this destination' };
+    if (req.is_check) {
+      const cs = doc.check_status || 'not_started';
+      const CHECK_MSG = { not_started: 'Not started', submitted: 'Submitted — waiting on the office to start it', in_progress: 'In progress — not cleared yet', failed: 'Failed — contact the deployment office' };
+      if (cs !== 'cleared') return { ...base, status: 'red', message: CHECK_MSG[cs] || 'Not cleared' };
+      if (!doc.expires) return { ...base, status: 'red', message: 'Cleared, but no renewal date on file' };
+    }
     if (doc.status === 'pending') return { ...base, status: 'red', message: 'Submitted, awaiting approval' };
     if (doc.status === 'rejected') return { ...base, status: 'red', message: 'Rejected — resubmit' };
     if (!req.has_expiry || !doc.expires) return { ...base, status: 'green', message: doc.verified ? 'On file' : 'On file · self-reported, awaiting admin check' };

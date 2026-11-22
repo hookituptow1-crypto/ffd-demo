@@ -38,6 +38,10 @@ Per requirement:
 * **YELLOW** — fine for this rotation, but lapses before the *next* rotation ends. Fix-by = next rotation start − lead time; the app shows a days-left countdown.
 * **GREEN** — valid through the next rotation.
 
+**Background check** (required for every destination) uses a status workflow: not started / submitted / in progress / cleared / failed, plus completion date, renewal date (defaults to completion + the type's validity, 365 days, editable per requirement type), provider, reference # and an encrypted report upload. Anything but *cleared*, or expired → RED; cleared but lapsing before the next rotation ends → YELLOW with fix-by countdown; otherwise GREEN. Contractors can submit a check for review but only the office can mark it cleared.
+
+**Home airports**: each contractor has a primary + optional alternate home airport (type-ahead picker by IATA code, city or airport name in the intake sheet and admin). The booking assistant searches mock fares from both and labels each fare's origin.
+
 Overall = worst item. Any active **blocker** (HR hold, medical review…) → RED. An admin **manual override** replaces the computed light; a reason is required and is shown to the contractor. Contractor-submitted documents count immediately but are flagged *self-reported* until an admin clicks **Verify** (decision for Leslie: require verification before they count?).
 
 ## Booking assistant (demo)

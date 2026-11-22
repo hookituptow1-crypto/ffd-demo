@@ -26,7 +26,7 @@ async function dash() {
     list.sort((a, b) => order[a.status] - order[b.status] || a.days_to_deploy - b.days_to_deploy);
     $('#rows').innerHTML = list.map((c) => `<tr class="click" data-id="${c.id}"><td>${pill(c.status)}${c.overridden ? '<div class="small mut mt">manual</div>' : ''}</td>
       <td><b>${esc(c.name)}</b><div class="small mut">${esc(c.employee_no)}${c.unverified ? ` · <span class="pill blue">${c.unverified} to verify</span>` : ''}</div></td>
-      <td>${esc(c.destination)}</td><td>${fdate(c.deploy_date)}<div class="small mut">${c.days_to_deploy > 0 ? `in ${c.days_to_deploy} days` : 'on rotation'}</div></td>
+      <td>${esc(c.destination)}<div class="small mut">🛫 ${esc(c.home_airport || '—')}${c.alt_airport ? ` / ${esc(c.alt_airport)}` : ''}</div></td><td>${fdate(c.deploy_date)}<div class="small mut">${c.days_to_deploy > 0 ? `in ${c.days_to_deploy} days` : 'on rotation'}</div></td>
       <td><div class="issues">${c.issues.map((i) => `<span class="pill ${i.status}">${esc(i.name)}</span>`).join('') || '<span class="mut small">None</span>'}</div>${c.fix_by ? `<div class="small mut mt">Fix by ${fdate(c.fix_by)}</div>` : ''}</td>
       <td class="mut">${esc(c.passport_masked) || '—'}</td><td class="mut">${esc(c.dob_masked) || '—'}</td></tr>`).join('') || '<tr><td colspan="7" class="mut center">No matches</td></tr>';
   };
@@ -45,16 +45,18 @@ function contractorModal(c = {}) {
       <div><label>Full name *</label><input id="cName" value="${esc(c.name)}"></div><div><label>Employee # *</label><input id="cEmp" value="${esc(c.employee_no)}"></div>
       <div><label>Phone</label><input id="cPhone" value="${esc(c.phone)}"></div><div><label>Email</label><input id="cEmail" value="${esc(c.email)}"></div>
       <div><label>Destination</label><select id="cDest"><option value="">—</option>${ds.map((d) => `<option value="${d.id}" ${d.id === c.destination_id ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select></div>
-      <div><label>Home airport (IATA)</label><input id="cHome" maxlength="3" value="${esc(c.home_airport)}"></div>
+      <div><label>Home airport</label><input id="cHome" data-airport value="${esc(c.home_airport)}" placeholder="Code or city" autocomplete="off"></div>
+      <div><label>Alternate airport</label><input id="cAlt" data-airport value="${esc(c.alt_airport)}" placeholder="Optional" autocomplete="off"></div><div></div>
       <div><label>Rotation start (deploy date)</label><input id="cDep" type="date" value="${esc(c.deploy_date)}"></div>
       <div><label>Next rotation start (optional)</label><input id="cNext" type="date" value="${esc(c.next_deploy_date)}"></div>
       <div><label>Days on</label><input id="cOn" type="number" value="${c.rotation_on ?? 60}"></div><div><label>Days off</label><input id="cOff" type="number" value="${c.rotation_off ?? 30}"></div></div>
     <label>Notes</label><textarea id="cNotes" rows="2">${esc(c.notes)}</textarea>
     ${c.id ? '' : `<h3 class="mt">App login (optional)</h3><div class="grid2"><div><label>Login email</label><input id="aEmail"></div><div><label>Temporary password (10+ chars)</label><input id="aPw" type="password" autocomplete="new-password"></div></div>`}
     <div class="row mt">${c.id ? '<button class="btn danger" id="cDel">Delete</button>' : ''}<button class="btn pri right" id="cSave">Save</button></div>`, (m, close) => {
+    attachAirportPickers(m);
     $('#cSave', m).addEventListener('click', () => guard(async () => {
       const body = { name: $('#cName', m).value, employee_no: $('#cEmp', m).value, phone: $('#cPhone', m).value, email: $('#cEmail', m).value, destination_id: $('#cDest', m).value || null,
-        home_airport: $('#cHome', m).value, deploy_date: $('#cDep', m).value, next_deploy_date: $('#cNext', m).value, rotation_on: +$('#cOn', m).value, rotation_off: +$('#cOff', m).value, notes: $('#cNotes', m).value };
+        home_airport: airportVal($('#cHome', m)), alt_airport: airportVal($('#cAlt', m)), deploy_date: $('#cDep', m).value, next_deploy_date: $('#cNext', m).value, rotation_on: +$('#cOn', m).value, rotation_off: +$('#cOff', m).value, notes: $('#cNotes', m).value };
       const r = c.id ? await api('PUT', `/api/admin/contractors/${c.id}`, body) : await api('POST', '/api/admin/contractors', body);
       if (!c.id && $('#aEmail', m).value) await api('PUT', `/api/admin/contractors/${r.id}/account`, { email: $('#aEmail', m).value, password: $('#aPw', m).value });
       close(); toast('Saved'); location.hash = `#/c/${c.id || r.id}`; route();
@@ -70,7 +72,7 @@ async function detail(id, sub = 'readiness') {
   main().innerHTML = `<div class="head"><a href="#/" class="btn sm">← Board</a><h1>${esc(c.name)}</h1>${pill(r.status)}${r.overridden ? '<span class="pill gray">manual override</span>' : ''}
       <div class="right row"><button class="btn" id="edit">Edit</button></div></div>
     <div class="row wrap mb small mut"><span>${esc(c.employee_no)}</span>·<span>📍 ${esc((A.dests.destinations.find((x) => x.id === c.destination_id) || {}).name || '—')}</span>·
-      <span>Rotation ${fdate(r.rotation.start)} → ${fdate(r.rotation.end)}</span>·<span>Next ${fdate(r.rotation.next_start)}</span>·<span>${c.rotation_on}/${c.rotation_off}</span>·<span>Login: ${esc(d.account_email || 'none')}</span></div>
+      <span>Rotation ${fdate(r.rotation.start)} → ${fdate(r.rotation.end)}</span>·<span>Next ${fdate(r.rotation.next_start)}</span>·<span>🛫 Home ${esc(airportLabel(c.home_airport) || '—')}${c.alt_airport ? ` · alt ${esc(c.alt_airport)}` : ''}</span>·<span>${c.rotation_on}/${c.rotation_off}</span>·<span>Login: ${esc(d.account_email || 'none')}</span></div>
     <div class="tabs">${[['readiness', 'Readiness'], ['profile', 'Profile / intake'], ['flights', `Flights (${d.flights.length})`], ['alerts', 'Alerts'], ['account', 'App login']].map(([k, t]) => `<button data-sub="${k}" class="${k === sub ? 'on' : ''}">${t}</button>`).join('')}</div>
     <div id="sub"></div>`;
   $('#edit').addEventListener('click', () => contractorModal(c));
@@ -83,7 +85,7 @@ function subReadiness(d) {
       <table class="mt"><thead><tr><th></th><th>Requirement</th><th>Expires</th><th>Status</th><th></th></tr></thead><tbody>
       ${r.items.map((i) => `<tr><td><span class="dot ${i.status}"></span></td><td><b>${esc(i.name)}</b><div class="small mut">${esc(CAT[i.category])}${i.document && i.document.ref_last4 ? ` · •••• ${esc(i.document.ref_last4)}` : ''}</div></td>
         <td>${i.document ? (i.has_expiry ? fdate(i.document.expires) : 'No expiry') : '—'}</td>
-        <td class="small">${esc(i.message)}${i.document && !i.document.verified ? `<div><span class="pill blue">self-reported</span></div>` : ''}${i.document && i.document.upload_id ? ` <a href="/api/uploads/${i.document.upload_id}" target="_blank" rel="noopener">photo</a>` : ''}</td>
+        <td class="small">${esc(i.message)}${i.is_check && i.document ? `<div class="mut">${esc(i.document.provider || '')}${i.document.reference ? ` · ref ${esc(i.document.reference)}` : ''}</div>` : ''}${i.document && !i.document.verified ? `<div><span class="pill blue">self-reported</span></div>` : ''}${i.document && i.document.upload_id ? ` <a href="/api/uploads/${i.document.upload_id}" target="_blank" rel="noopener">photo</a>` : ''}</td>
         <td class="row">${i.document && !i.document.verified ? `<button class="btn sm pri" data-verify="${i.requirement_type_id}">Verify</button>` : ''}<button class="btn sm" data-doc="${i.requirement_type_id}">Edit</button></td></tr>`).join('')}</tbody></table></div>
     <div><div class="card"><h2>Manual override</h2><p class="small mut">Overrides the computed light. The reason is shown to the contractor.</p>
         <div class="grid2"><div><label>Status</label><select id="ovS"><option value="">Automatic</option>${['green', 'yellow', 'red'].map((s) => `<option ${c.override_status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
@@ -98,7 +100,32 @@ function subReadiness(d) {
   $$('[data-blk]').forEach((b) => b.addEventListener('click', () => guard(async () => { await api('PUT', `/api/admin/blockers/${b.dataset.blk}`, { active: b.dataset.act === '1' }); reload(); })));
   $('#blkAdd').addEventListener('click', () => guard(async () => { await api('POST', `/api/admin/contractors/${c.id}/blockers`, { description: $('#blkD').value }); reload(); }));
 }
+const CHECK_ST = [['not_started', 'Not started'], ['submitted', 'Submitted'], ['in_progress', 'In progress'], ['cleared', 'Cleared'], ['failed', 'Failed']];
+function checkModal(c, i, done) {
+  const doc = i.document || {};
+  modal(`<div class="row"><h2>🛡️ ${esc(i.name)}</h2><button class="btn sm right" data-close>✕</button></div>
+    <p class="small mut">Missing, failed, in progress or expired = RED. Expires before the next rotation ends = YELLOW. Default validity ${i.validity_days || 365} days from completion (change it in Destinations → requirement types).</p>
+    <div class="grid2"><div><label>Status</label><select id="bS">${CHECK_ST.map(([k, t]) => `<option value="${k}" ${(doc.check_status || 'not_started') === k ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div><label>Provider</label><input id="bP" value="${esc(doc.provider)}" placeholder="e.g. Sterling, HireRight"></div>
+    <div><label>Reference #</label><input id="bR" value="${esc(doc.reference)}"></div><div></div>
+    <div><label>Completion date</label><input id="bC" type="date" value="${esc(doc.issued)}"></div>
+    <div><label>Expiration / renewal date</label><input id="bE" type="date" value="${esc(doc.expires)}"><div class="small mut">Leave blank to use completion + ${i.validity_days || 365} days</div></div></div>
+    <label>Report / document (stored encrypted)</label><input id="bF" type="file" accept="image/jpeg,image/png,image/webp,application/pdf">
+    ${doc.upload_id ? `<div class="small mt"><a href="/api/uploads/${doc.upload_id}" target="_blank" rel="noopener">View current document</a></div>` : ''}
+    <label>Notes</label><input id="bN" value="${esc(doc.notes)}">
+    <div class="row mt">${i.document ? '<button class="btn danger" id="bDel">Remove</button>' : ''}<button class="btn pri right" id="bSave">Save (verified)</button></div>`, (m, close) => {
+    $('#bS', m).addEventListener('change', () => { if ($('#bS', m).value === 'cleared' && !$('#bC', m).value) $('#bC', m).value = new Date().toISOString().slice(0, 10); });
+    $('#bSave', m).addEventListener('click', () => guard(async () => {
+      const f = $('#bF', m).files[0];
+      await api('PUT', `/api/admin/contractors/${c.id}/documents/${i.requirement_type_id}`, { check_status: $('#bS', m).value, provider: $('#bP', m).value, reference: $('#bR', m).value,
+        issued: $('#bC', m).value, expires: $('#bE', m).value, notes: $('#bN', m).value, file: f ? await fileToPayload(f, i.name) : undefined });
+      close(); toast('Background check saved'); done();
+    }));
+    $('#bDel', m)?.addEventListener('click', () => guard(async () => { await api('DELETE', `/api/admin/contractors/${c.id}/documents/${i.requirement_type_id}`); close(); done(); }));
+  });
+}
 function docModal(c, i, done) {
+  if (i.is_check) return checkModal(c, i, done);
   const doc = i.document || {};
   modal(`<div class="row"><h2>${esc(i.name)}</h2><button class="btn sm right" data-close>✕</button></div>
     <div class="grid2"><div><label>Doc # (last 4 only)</label><input id="dL4" maxlength="4" value="${esc(doc.ref_last4)}"></div>
@@ -201,7 +228,9 @@ function assistantPage() {
   });
   async function book(p, airline) {
     await guard(async () => {
-      const r = await api('POST', '/api/admin/assistant/book', { contractor_id: p.contractor.id, destination_id: p.destination.id, depart_date: p.depart_date, airline });
+      const fare = p.fares.find((f) => f.id === airline);
+      const r = await api('POST', '/api/admin/assistant/book', { contractor_id: p.contractor.id, destination_id: p.destination.id, depart_date: p.depart_date, fare_id: airline });
+      airline = `${fare.airline} from ${fare.origin}`;
       chat.push({ html: `✅ <b>Booked.</b> ${esc(p.contractor.name)} → ${esc(p.destination.name)} on ${esc(airline)}, confirmation <b>${esc(r.confirmation)}</b>. Added to their Flights tab and alert sent. <a href="#/c/${p.contractor.id}/flights">View itinerary</a>` });
       draw(); toast('Booked & contractor alerted');
     });
@@ -219,10 +248,10 @@ function planHtml(p, idx) {
     ${p.notes.map((n) => `<div class="small mut">ℹ️ ${esc(n)}</div>`).join('')}
     <div class="mt"><b class="small">Readiness check for ${esc(p.destination.country)}</b>${r.items.map((i) => `<div class="row small"><span class="dot ${i.status}"></span><span>${esc(i.name)}</span><span class="mut">— ${esc(i.message)}</span></div>`).join('')}
     ${r.blockers.map((b) => `<div class="row small"><span class="dot red"></span>${esc(b.description)}</div>`).join('')}</div>
-    <div class="mt small"><b>Proposed trip:</b> ${esc(p.contractor.home_airport)} → ${esc(p.destination.airport)} · depart ${fdate(p.depart_date)} · return ~${fdate(p.return_date)} (${r.rotation.on}-day rotation)</div>
+    <div class="mt small"><b>Proposed trip:</b> 🛫 ${esc(airportLabel(p.contractor.home_airport))}${p.contractor.alt_airport ? ` (alt ${esc(p.contractor.alt_airport)})` : ''} → ${esc(p.destination.airport)} · depart ${fdate(p.depart_date)} · return ~${fdate(p.return_date)} (${r.rotation.on}-day rotation)</div>
     <div class="mt"><b class="small">Fare options (DEMO data, ranked by price)</b>${p.fares.map((f, i) => `<div class="fare ${i === 0 ? 'best' : ''}"><div class="price">$${f.price_usd.toLocaleString()}</div>
-      <div><b>${esc(f.airline)}</b>${i === 0 ? ' <span class="pill green">Cheapest</span>' : ''}<div class="small mut">${f.legs.map((l) => esc(l.flight_no)).join(' + ')} · via ${esc(f.via)} · ${f.duration_h}h · ${f.refundable ? 'refundable' : 'non-refundable'}</div><div class="small mut">Departs ${fdt(f.depart_at)} · arrives ${fdt(f.arrive_at)}</div></div>
-      <div></div>${p.can_book ? `<button class="btn ${i === 0 ? 'pri' : ''} sm" data-book="${esc(f.airline)}" data-idx="${idx}">Approve & book</button>` : '<button class="btn sm" disabled title="Contractor is RED">Blocked</button>'}</div>`).join('')}</div>`;
+      <div><b>${esc(f.airline)}</b>${i === 0 ? ' <span class="pill green">Cheapest</span>' : ''}<div class="small mut"><b>${esc(f.origin)}</b>${f.origin !== p.contractor.home_airport ? ' (alternate)' : ' (home)'} → ${esc(p.destination.airport)} · ${f.legs.map((l) => esc(l.flight_no)).join(' + ')} · via ${esc(f.via)} · ${f.duration_h}h · ${f.refundable ? 'refundable' : 'non-refundable'}</div><div class="small mut">Departs ${fdt(f.depart_at)} · arrives ${fdt(f.arrive_at)}</div></div>
+      <div></div>${p.can_book ? `<button class="btn ${i === 0 ? 'pri' : ''} sm" data-book="${esc(f.id)}" data-idx="${idx}">Approve & book</button>` : '<button class="btn sm" disabled title="Contractor is RED">Blocked</button>'}</div>`).join('')}</div>`;
 }
 
 // ---------------- Demo scenarios ----------------
@@ -242,9 +271,10 @@ async function scenarios() {
       ${card('Sam Kowalski', 'C · Red — expired passport + missing visa', 'Passport expired and no Iraq work visa on file. NO-GO.')}
       ${card('John Doe', 'C/D · Red — missing yellow fever shot → live fix', 'Djibouti requires yellow fever. <b>Walk-through:</b> 1) Ask the assistant “John Doe needs to go to Africa” → booking is BLOCKED. 2) Log in as John, tap <i>Fix now</i> on Yellow Fever, enter shot date, attach a photo → light flips to GREEN. 3) Ask the assistant again → fares can be approved and booked; flights appear in John’s app with an alert.')}
       ${card('Tyler Brandt', 'Green — AI booking allowed', 'Cleared for Djibouti. “Tyler Brandt needs to go to Africa” returns ranked fares you can approve.')}
-      ${card('Trent Vaughn', 'Red — manual hold', 'All documents valid, but an admin blocker + override (HR hold) keeps him RED with the reason shown in his app.')}
+      ${card('Dana Whitfield', 'Yellow — background check renewal due', 'Background check (valid 1 year from completion) expires before her next rotation ends. Countdown shown in her app; open her record → Background Check to renew it.')}
+      ${card('Trent Vaughn', 'Red — background check in progress + HR hold', 'Background re-investigation is <i>in progress</i> (RED until cleared), plus an admin blocker/override with the reason shown in his app.')}
     </div>
-    <div class="card mt"><h3>Try these too</h3><p class="small mut">• Edit one of Marcus’s flights → he gets an automatic “Flight changed” alert.<br>• Send an alert to all RED contractors from <a href="#/alerts">Send alert</a>.<br>• Add a requirement to a destination in <a href="#/destinations">Destinations</a> and watch statuses recompute.</p></div>`;
+    <div class="card mt"><h3>Try these too</h3><p class="small mut">• Edit one of Marcus’s flights → he gets an automatic “Flight changed” alert.<br>• Send an alert to all RED contractors from <a href="#/alerts">Send alert</a>.<br>• Home airports: every contractor has a primary + alternate (type-ahead picker in My info / admin). The assistant searches fares from both — John departs from MEM.<br>• Add a requirement to a destination in <a href="#/destinations">Destinations</a> and watch statuses recompute.</p></div>`;
   $('#reset').addEventListener('click', () => guard(async () => { if (!confirm('Reset ALL demo data to the starting scenarios? You will be signed out.')) return; await api('POST', '/api/admin/demo/reset'); location.href = '/'; }));
 }
 
@@ -255,7 +285,7 @@ async function destinations() {
     <div class="cols"><div>${ds.map((d) => `<div class="card mb"><div class="row"><h2>${esc(d.name)}</h2><span class="pill gray">${esc(d.region)}</span><span class="mut small">${esc(d.airport)}</span><button class="btn sm right" data-ed="${d.id}">Edit</button></div>
       <div class="issues mt">${d.requirement_ids.map((id) => `<span class="pill gray">${esc((rts.find((r) => r.id === id) || {}).name)}</span>`).join('')}</div></div>`).join('')}</div>
     <div class="card"><h2>Requirement types</h2><table class="mt"><thead><tr><th>Name</th><th>Validity rule</th><th>Lead time</th><th></th></tr></thead><tbody>
-      ${rts.map((r) => `<tr><td><b>${esc(r.name)}</b><div class="small mut">${esc(CAT[r.category])}</div></td><td class="small">${r.has_expiry ? (r.min_validity_days ? `valid ${r.min_validity_days}d past return` : 'valid through return') : 'no expiry'}</td><td class="small">${r.lead_days}d</td><td><button class="btn sm" data-er="${r.id}">Edit</button></td></tr>`).join('')}</tbody></table></div></div>`;
+      ${rts.map((r) => `<tr><td><b>${esc(r.name)}</b><div class="small mut">${esc(CAT[r.category])}</div></td><td class="small">${r.has_expiry ? (r.min_validity_days ? `valid ${r.min_validity_days}d past return` : 'valid through return') : 'no expiry'}${r.validity_days ? `<div class="mut">default ${r.validity_days}d from completion</div>` : ''}${r.is_check ? '<div><span class="pill blue">status workflow</span></div>' : ''}</td><td class="small">${r.lead_days}d</td><td><button class="btn sm" data-er="${r.id}">Edit</button></td></tr>`).join('')}</tbody></table></div></div>`;
   const destModal = (d = { requirement_ids: [] }) => modal(`<div class="row"><h2>${d.id ? 'Edit' : 'New'} destination</h2><button class="btn sm right" data-close>✕</button></div>
     <div class="grid2"><div><label>Name *</label><input id="dN" value="${esc(d.name)}"></div><div><label>Country *</label><input id="dC" value="${esc(d.country)}"></div>
     <div><label>Region</label><input id="dR" value="${esc(d.region)}" placeholder="Africa, Middle East…"></div><div><label>Arrival airport (IATA)</label><input id="dA" maxlength="3" value="${esc(d.airport)}"></div></div>
@@ -269,10 +299,11 @@ async function destinations() {
   const rtModal = (r = { has_expiry: 1, lead_days: 30, min_validity_days: 0, category: 'other' }) => modal(`<div class="row"><h2>${r.id ? 'Edit' : 'New'} requirement type</h2><button class="btn sm right" data-close>✕</button></div>
     <div class="grid2"><div><label>Name *</label><input id="rN" value="${esc(r.name)}"></div><div><label>Category</label><select id="rC">${Object.keys(CAT).map((k) => `<option value="${k}" ${r.category === k ? 'selected' : ''}>${CAT[k]}</option>`).join('')}</select></div>
     <div><label>Must stay valid N days past return</label><input id="rM" type="number" value="${r.min_validity_days}"></div><div><label>Lead time to renew (days)</label><input id="rL" type="number" value="${r.lead_days}"></div>
-    <div><label>Intake keyword (matches contractor entries)</label><input id="rK" value="${esc(r.keyword)}"></div><div><label class="chk"><input type="checkbox" id="rE" ${r.has_expiry ? 'checked' : ''}> Has an expiration date</label></div></div>
+    <div><label>Intake keyword (matches contractor entries)</label><input id="rK" value="${esc(r.keyword)}"></div><div><label class="chk"><input type="checkbox" id="rE" ${r.has_expiry ? 'checked' : ''}> Has an expiration date</label></div>
+    <div><label class="chk"><input type="checkbox" id="rX" ${r.is_check ? 'checked' : ''}> Background-check workflow (status: not started → cleared)</label></div><div><label>Default validity from completion (days, 0 = enter expiry)</label><input id="rV" type="number" value="${r.validity_days || 0}"></div></div>
     <label>Instructions shown to contractor</label><textarea id="rI" rows="3">${esc(r.instructions)}</textarea><button class="btn pri mt" id="rS">Save</button>`, (m, close) => {
     $('#rS', m).addEventListener('click', () => guard(async () => {
-      const body = { name: $('#rN', m).value, category: $('#rC', m).value, min_validity_days: +$('#rM', m).value, lead_days: +$('#rL', m).value, keyword: $('#rK', m).value, has_expiry: $('#rE', m).checked, instructions: $('#rI', m).value };
+      const body = { name: $('#rN', m).value, category: $('#rC', m).value, min_validity_days: +$('#rM', m).value, lead_days: +$('#rL', m).value, keyword: $('#rK', m).value, has_expiry: $('#rE', m).checked, is_check: $('#rX', m).checked, validity_days: +$('#rV', m).value, instructions: $('#rI', m).value };
       r.id ? await api('PUT', `/api/admin/requirement-types/${r.id}`, body) : await api('POST', '/api/admin/requirement-types', body); close(); toast('Saved'); destinations();
     }));
   });

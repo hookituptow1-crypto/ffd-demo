@@ -151,3 +151,19 @@ CREATE TABLE IF NOT EXISTS push_subs (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `);
+
+// ---- lightweight migrations (safe to run on every boot) ----
+function addCol(table, col, def) {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+}
+addCol('contractors', 'alt_airport', "TEXT DEFAULT ''");
+addCol('requirement_types', 'is_check', 'INTEGER NOT NULL DEFAULT 0');      // background-check style requirement (status workflow)
+addCol('requirement_types', 'validity_days', 'INTEGER NOT NULL DEFAULT 0'); // default validity from completion date (0 = enter expiry)
+addCol('documents', 'check_status', 'TEXT');                                // not_started|submitted|in_progress|cleared|failed
+addCol('documents', 'provider', "TEXT DEFAULT ''");
+addCol('documents', 'reference', "TEXT DEFAULT ''");
+db.exec("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)");
+db.meta = {
+  get: (k) => (db.prepare('SELECT v FROM meta WHERE k = ?').get(k) || {}).v,
+  set: (k, v) => db.prepare('INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v').run(k, String(v)),
+};

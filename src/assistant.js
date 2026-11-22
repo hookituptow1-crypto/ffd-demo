@@ -57,7 +57,7 @@ function searchFares(from, to, departDate) {
     const c1 = code.split('/')[0], c2 = (code.split('/')[1] || c1);
     const dep = `${departDate}T${String(depH).padStart(2, '0')}:${rnd() > 0.5 ? '30' : '05'}`;
     const arr = new Date(new Date(dep + ':00Z').getTime() + hours * 3600000).toISOString().slice(0, 16);
-    return { airline, price_usd: price, duration_h: hours, stops: 1, via: hub, refundable: rnd() > 0.6,
+    return { id: `${from}-${code}`, origin: from, airline, price_usd: price, duration_h: hours, stops: 1, via: hub, refundable: rnd() > 0.6,
       legs: [
         { airline, flight_no: `${c1} ${n1}`, from_airport: from, to_airport: hub, depart_at: dep },
         { airline, flight_no: `${c2} ${n2}`, from_airport: hub, to_airport: to, arrive_at: arr },
@@ -98,10 +98,15 @@ function plan(text) {
   const sim = { ...contractor, deploy_date: depart, next_deploy_date: null, override_status: null };
   const readiness = evaluate(sim, reqs, docs, blockers);
   const from = contractor.home_airport || 'IAH';
-  const fares = searchFares(from, dest.airport || 'XXX', depart);
+  if (!contractor.home_airport) notes.push('No home airport on file — searched from IAH. Add one in their profile.');
+  let fares = searchFares(from, dest.airport || 'XXX', depart);
+  if (contractor.alt_airport && contractor.alt_airport !== from) {
+    fares = fares.concat(searchFares(contractor.alt_airport, dest.airport || 'XXX', depart).slice(0, 3)).sort((a, b) => a.price_usd - b.price_usd);
+    notes.push(`Searched home airport ${from} plus alternate ${contractor.alt_airport}.`);
+  }
   const issues = readiness.items.filter((i) => i.status !== 'green');
   return {
-    ok: true, contractor: { id: contractor.id, name: contractor.name, employee_no: contractor.employee_no, home_airport: from },
+    ok: true, contractor: { id: contractor.id, name: contractor.name, employee_no: contractor.employee_no, home_airport: from, alt_airport: contractor.alt_airport || '' },
     destination: { id: dest.id, name: dest.name, country: dest.country, airport: dest.airport },
     depart_date: depart, return_date: readiness.rotation.end, readiness, issues, notes, fares,
     can_book: readiness.status !== 'red',

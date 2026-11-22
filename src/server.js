@@ -8,14 +8,17 @@ const C = require('./crypto');
 const V = require('./validate');
 const { evaluate } = require('./status');
 const assistant = require('./assistant');
-const { seed, ADMIN, CONTRACTOR_PW } = require('./seed');
+const { seed, ADMIN, CONTRACTOR_PW, SEED_VERSION } = require('./seed');
 
 const PORT = Number(process.env.PORT || 4300);
 const DEMO_MODE = process.env.DEMO_MODE !== '0';
 const SESSION_HOURS = 12;
 const UPLOAD_DIR = path.join(__dirname, '..', 'data', 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-if (!db.prepare('SELECT COUNT(*) n FROM users').get().n) seed();
+if (!db.prepare('SELECT COUNT(*) n FROM users').get().n || (DEMO_MODE && db.meta.get('seed_version') !== SEED_VERSION)) {
+  for (const f of fs.readdirSync(UPLOAD_DIR)) fs.unlinkSync(path.join(UPLOAD_DIR, f));
+  seed(); console.log(`Seeded demo data v${SEED_VERSION}`);
+}
 
 // ---- Web push (VAPID keys generated once, stored server-side only) ----
 const vapidPath = path.join(__dirname, '..', 'data', 'vapid.json');
@@ -76,7 +79,13 @@ function readiness(c) {
 }
 const getContractor = (id) => { const c = db.prepare('SELECT * FROM contractors WHERE id = ?').get(id); if (!c) throw nf(); return c; };
 const destName = (id) => (db.prepare('SELECT name FROM destinations WHERE id = ?').get(id || 0) || {}).name || '—';
-const getProfile = (cid) => { const p = db.prepare('SELECT * FROM profiles WHERE contractor_id = ?').get(cid); return p ? { ...C.decJSON(p.data_enc), _updated_at: p.updated_at, _updated_by: p.updated_by } : V.profile({}); };
+const getProfile = (cid) => {
+  const p = db.prepare('SELECT * FROM profiles WHERE contractor_id = ?').get(cid);
+  const out = p ? { ...C.decJSON(p.data_enc), _updated_at: p.updated_at, _updated_by: p.updated_by } : V.profile({});
+  const c = db.prepare('SELECT home_airport, alt_airport FROM contractors WHERE id = ?').get(cid) || {};
+  out.travel = { home_airport: c.home_airport || '', alt_airport: c.alt_airport || '' }; // contractor columns are the source of truth
+  return out;
+};
 const mask = (s) => (s ? `•••• ${String(s).slice(-4)}` : '');
 
 function sendAlert(cids, kind, title, body, by) {
@@ -165,11 +174,17 @@ app.post('/api/my/requirements/:typeId', need('contractor'), (req, res) => {
   const c = me(req); const typeId = idParam(req.params.typeId);
   const rt = getReqs(c.destination_id).find((r) => r.id === typeId); if (!rt) throw nf('Requirement not required for your site');
   const issued = V.date(req.body.issued, { name: 'Issued / shot date' });
-  const expires = V.date(req.body.expires, { name: 'Expiration date', required: !!rt.has_expiry });
+  const expires = V.date(req.body.expires, { name: 'Expiration date', required: !!rt.has_expiry && !rt.is_check });
   const ref = V.str(req.body.number, 40, { name: 'Document number' });
   let uploadId = null;
   if (req.body.file) uploadId = storeUpload(c.id, { label: rt.name, ...req.body.file }, 'contractor');
-  upsertDoc(c.id, typeId, { ref_last4: ref.slice(-4), issued, expires, status: 'valid', verified: 0, source: 'contractor', upload_id: uploadId, notes: 'Submitted by contractor in app' });
+  if (rt.is_check) {
+    // Contractors can submit a background check but only the office can mark it cleared.
+    const cur = db.prepare('SELECT * FROM documents WHERE contractor_id = ? AND requirement_type_id = ?').get(c.id, typeId);
+    upsertDoc(c.id, typeId, { ref_last4: '', issued, expires: defaultExpiry(rt, issued, expires), status: 'valid', verified: 0, source: 'contractor', upload_id: uploadId,
+      check_status: cur && cur.check_status === 'in_progress' ? 'in_progress' : 'submitted', provider: V.str(req.body.provider, 80, { name: 'Provider' }),
+      reference: V.str(req.body.reference || req.body.number, 60, { name: 'Reference #' }), notes: 'Submitted by contractor in app — awaiting office review' });
+  } else upsertDoc(c.id, typeId, { ref_last4: ref.slice(-4), issued, expires, status: 'valid', verified: 0, source: 'contractor', upload_id: uploadId, notes: 'Submitted by contractor in app' });
   audit(req, 'requirement_submitted', `${c.name}: ${rt.name}`);
   res.json({ ok: true, readiness: readiness(c) });
 });
@@ -207,13 +222,21 @@ app.get('/api/uploads/:id', need(), (req, res) => {
 });
 
 function upsertDoc(cid, typeId, d) {
-  db.prepare(`INSERT INTO documents (contractor_id, requirement_type_id, ref_last4, issued, expires, status, notes, verified, source, upload_id, updated_at)
-    VALUES (@cid,@typeId,@ref_last4,@issued,@expires,@status,@notes,@verified,@source,@upload_id,datetime('now'))
+  db.prepare(`INSERT INTO documents (contractor_id, requirement_type_id, ref_last4, issued, expires, status, notes, verified, source, upload_id, check_status, provider, reference, updated_at)
+    VALUES (@cid,@typeId,@ref_last4,@issued,@expires,@status,@notes,@verified,@source,@upload_id,@check_status,@provider,@reference,datetime('now'))
     ON CONFLICT(contractor_id, requirement_type_id) DO UPDATE SET ref_last4=excluded.ref_last4, issued=excluded.issued, expires=excluded.expires,
-    status=excluded.status, notes=excluded.notes, verified=excluded.verified, source=excluded.source, upload_id=COALESCE(excluded.upload_id, documents.upload_id), updated_at=excluded.updated_at`)
-    .run({ cid, typeId, ref_last4: '', issued: null, expires: null, status: 'valid', notes: '', verified: 1, source: 'admin', upload_id: null, ...d });
+    status=excluded.status, notes=excluded.notes, verified=excluded.verified, source=excluded.source, upload_id=COALESCE(excluded.upload_id, documents.upload_id),
+    check_status=excluded.check_status, provider=excluded.provider, reference=excluded.reference, updated_at=excluded.updated_at`)
+    .run({ cid, typeId, ref_last4: '', issued: null, expires: null, status: 'valid', notes: '', verified: 1, source: 'admin', upload_id: null, check_status: null, provider: '', reference: '', ...d });
+}
+const CHECK_STATUSES = ['not_started', 'submitted', 'in_progress', 'cleared', 'failed'];
+// Expiry for check-type requirements defaults to completion date + the type's validity (e.g. 365 days)
+function defaultExpiry(rt, issued, expires) {
+  if (expires || !rt.validity_days || !issued) return expires;
+  return new Date(Date.parse(issued + 'T00:00:00Z') + rt.validity_days * 86400000).toISOString().slice(0, 10);
 }
 function saveProfile(cid, p, by) {
+  if (p.travel) db.prepare('UPDATE contractors SET home_airport = ?, alt_airport = ? WHERE id = ?').run(p.travel.home_airport || '', p.travel.alt_airport || '', cid);
   db.prepare(`INSERT INTO profiles (contractor_id, data_enc, updated_by, updated_at) VALUES (?,?,?,datetime('now'))
     ON CONFLICT(contractor_id) DO UPDATE SET data_enc=excluded.data_enc, updated_by=excluded.updated_by, updated_at=excluded.updated_at`).run(cid, C.encJSON(p), by);
 }
@@ -222,6 +245,7 @@ function syncProfileToDocs(cid, p) {
   const c = getContractor(cid); const synced = [];
   const docs = new Map(db.prepare('SELECT * FROM documents WHERE contractor_id = ?').all(cid).map((d) => [d.requirement_type_id, d]));
   for (const rt of getReqs(c.destination_id)) {
+    if (rt.is_check) continue; // background checks are never self-cleared from the intake form
     let entry = null;
     const kw = (rt.keyword || '').toLowerCase();
     if (rt.category === 'passport' && p.passport.number) entry = { number: p.passport.number, issued: p.passport.issued, expires: p.passport.expires };
@@ -250,7 +274,7 @@ admin.get('/contractors', (req, res) => {
       deploy_date: r.rotation.start, next_deploy: r.rotation.next_start, days_to_deploy: r.rotation.days_to_deploy, status: r.status, overridden: r.overridden,
       issues: r.items.filter((i) => i.status !== 'green').map((i) => ({ name: i.name, status: i.status })).concat(r.blockers.map((b) => ({ name: b.description, status: 'red' }))),
       fix_by: r.fix_by, passport_masked: mask(p.passport && p.passport.number), dob_masked: p.personal.dob ? `••••-••-${p.personal.dob.slice(-2)}` : '',
-      unverified: r.items.filter((i) => i.document && !i.document.verified).length, scenario: c.notes };
+      unverified: r.items.filter((i) => i.document && !i.document.verified).length, scenario: c.notes, home_airport: c.home_airport, alt_airport: c.alt_airport };
   });
   res.json({ contractors: list });
 });
@@ -268,18 +292,19 @@ function contractorFields(b) {
   return { name: V.str(b.name, 120, { required: true, name: 'Name' }), employee_no: V.str(b.employee_no, 40, { required: true, name: 'Employee #' }),
     phone: V.str(b.phone, 40, { name: 'Phone' }), email: V.str(b.email, 120, { name: 'Email', pattern: /^[^@\s]+@[^@\s]+\.[^@\s]+$/ }),
     home_airport: V.str(b.home_airport, 3, { name: 'Home airport', pattern: /^[A-Za-z]{3}$/ }).toUpperCase(),
+    alt_airport: V.str(b.alt_airport, 3, { name: 'Alternate airport', pattern: /^[A-Za-z]{3}$/ }).toUpperCase(),
     destination_id, deploy_date: V.date(b.deploy_date, { name: 'Deploy date' }), next_deploy_date: V.date(b.next_deploy_date, { name: 'Next deploy date' }),
     rotation_on: V.int(b.rotation_on ?? 60, 1, 365, 'Days on'), rotation_off: V.int(b.rotation_off ?? 30, 0, 365, 'Days off'), notes: V.str(b.notes, 1000, { name: 'Notes' }) };
 }
 admin.post('/contractors', (req, res) => {
   const f = contractorFields(req.body);
-  const id = Number(db.prepare(`INSERT INTO contractors (name, employee_no, phone, email, home_airport, destination_id, deploy_date, next_deploy_date, rotation_on, rotation_off, notes)
-    VALUES (@name,@employee_no,@phone,@email,@home_airport,@destination_id,@deploy_date,@next_deploy_date,@rotation_on,@rotation_off,@notes)`).run(f).lastInsertRowid);
+  const id = Number(db.prepare(`INSERT INTO contractors (name, employee_no, phone, email, home_airport, alt_airport, destination_id, deploy_date, next_deploy_date, rotation_on, rotation_off, notes)
+    VALUES (@name,@employee_no,@phone,@email,@home_airport,@alt_airport,@destination_id,@deploy_date,@next_deploy_date,@rotation_on,@rotation_off,@notes)`).run(f).lastInsertRowid);
   audit(req, 'contractor_create', f.name); res.json({ ok: true, id });
 });
 admin.put('/contractors/:id', (req, res) => {
   const c = getContractor(idParam(req.params.id)); const f = contractorFields(req.body);
-  db.prepare(`UPDATE contractors SET name=@name, employee_no=@employee_no, phone=@phone, email=@email, home_airport=@home_airport, destination_id=@destination_id,
+  db.prepare(`UPDATE contractors SET name=@name, employee_no=@employee_no, phone=@phone, email=@email, home_airport=@home_airport, alt_airport=@alt_airport, destination_id=@destination_id,
     deploy_date=@deploy_date, next_deploy_date=@next_deploy_date, rotation_on=@rotation_on, rotation_off=@rotation_off, notes=@notes WHERE id=@id`).run({ ...f, id: c.id });
   audit(req, 'contractor_update', f.name); res.json({ ok: true });
 });
@@ -300,9 +325,15 @@ admin.put('/contractors/:id/account', (req, res) => {
 });
 admin.put('/contractors/:id/documents/:typeId', (req, res) => {
   const c = getContractor(idParam(req.params.id)); const typeId = idParam(req.params.typeId);
-  if (!db.prepare('SELECT 1 FROM requirement_types WHERE id = ?').get(typeId)) throw nf();
-  upsertDoc(c.id, typeId, { ref_last4: V.str(req.body.ref_last4, 4, { name: 'Last 4' }), issued: V.date(req.body.issued, { name: 'Issued' }),
-    expires: V.date(req.body.expires, { name: 'Expires' }), status: V.str(req.body.status || 'valid', 10, { name: 'Status', oneOf: ['valid', 'pending', 'rejected'] }),
+  const rt = db.prepare('SELECT * FROM requirement_types WHERE id = ?').get(typeId); if (!rt) throw nf();
+  const issued = V.date(req.body.issued, { name: rt.is_check ? 'Completion date' : 'Issued' });
+  let uploadId = null;
+  if (req.body.file) uploadId = storeUpload(c.id, { label: rt.name, ...req.body.file }, 'admin');
+  upsertDoc(c.id, typeId, { ref_last4: V.str(req.body.ref_last4, 4, { name: 'Last 4' }), issued,
+    expires: rt.is_check ? defaultExpiry(rt, issued, V.date(req.body.expires, { name: 'Renewal date' })) : V.date(req.body.expires, { name: 'Expires' }),
+    status: V.str(req.body.status || 'valid', 10, { name: 'Status', oneOf: ['valid', 'pending', 'rejected'] }),
+    check_status: rt.is_check ? V.str(req.body.check_status || 'not_started', 12, { name: 'Check status', oneOf: CHECK_STATUSES }) : null,
+    provider: V.str(req.body.provider, 80, { name: 'Provider' }), reference: V.str(req.body.reference, 60, { name: 'Reference #' }), upload_id: uploadId,
     notes: V.str(req.body.notes, 300, { name: 'Notes' }), verified: req.body.verified === false ? 0 : 1, source: 'admin' });
   audit(req, 'document_upsert', `${c.name} type ${typeId}`); res.json({ ok: true, readiness: readiness(c) });
 });
@@ -405,9 +436,10 @@ function saveRt(req, id) {
   const f = { name: V.str(req.body.name, 80, { required: true, name: 'Name' }),
     category: V.str(req.body.category, 20, { required: true, name: 'Category', oneOf: ['passport', 'visa', 'immunization', 'id', 'clearance', 'other'] }),
     has_expiry: req.body.has_expiry ? 1 : 0, min_validity_days: V.int(req.body.min_validity_days ?? 0, 0, 730, 'Validity buffer'),
-    lead_days: V.int(req.body.lead_days ?? 30, 0, 365, 'Lead time'), instructions: V.str(req.body.instructions, 500, { name: 'Instructions' }), keyword: V.str(req.body.keyword, 40, { name: 'Keyword' }).toLowerCase() };
-  if (id) db.prepare('UPDATE requirement_types SET name=@name, category=@category, has_expiry=@has_expiry, min_validity_days=@min_validity_days, lead_days=@lead_days, instructions=@instructions, keyword=@keyword WHERE id=@id').run({ ...f, id });
-  else id = Number(db.prepare('INSERT INTO requirement_types (name, category, has_expiry, min_validity_days, lead_days, instructions, keyword) VALUES (@name,@category,@has_expiry,@min_validity_days,@lead_days,@instructions,@keyword)').run(f).lastInsertRowid);
+    lead_days: V.int(req.body.lead_days ?? 30, 0, 365, 'Lead time'), is_check: req.body.is_check ? 1 : 0,
+    validity_days: V.int(req.body.validity_days ?? 0, 0, 3650, 'Default validity'), instructions: V.str(req.body.instructions, 500, { name: 'Instructions' }), keyword: V.str(req.body.keyword, 40, { name: 'Keyword' }).toLowerCase() };
+  if (id) db.prepare('UPDATE requirement_types SET name=@name, category=@category, has_expiry=@has_expiry, min_validity_days=@min_validity_days, lead_days=@lead_days, is_check=@is_check, validity_days=@validity_days, instructions=@instructions, keyword=@keyword WHERE id=@id').run({ ...f, id });
+  else id = Number(db.prepare('INSERT INTO requirement_types (name, category, has_expiry, min_validity_days, lead_days, is_check, validity_days, instructions, keyword) VALUES (@name,@category,@has_expiry,@min_validity_days,@lead_days,@is_check,@validity_days,@instructions,@keyword)').run(f).lastInsertRowid);
   audit(req, 'requirement_type_save', f.name); return id;
 }
 admin.post('/requirement-types', (req, res) => res.json({ ok: true, id: saveRt(req) }));
@@ -424,7 +456,7 @@ admin.post('/assistant/book', (req, res) => {
   const sim = assistant.plan(`${c.employee_no} ${db.prepare('SELECT name FROM destinations WHERE id = ?').get(destId)?.name || ''} ${req.body.depart_date || ''}`);
   if (!sim.ok) throw new V.VErr(sim.message);
   if (!sim.can_book) return res.status(409).json({ error: `Booking blocked: ${c.name} is RED for ${sim.destination.name}. ${sim.summary}` });
-  const fare = sim.fares.find((f) => f.airline === req.body.airline);
+  const fare = sim.fares.find((f) => f.id === req.body.fare_id || (!req.body.fare_id && f.airline === req.body.airline));
   if (!fare) throw new V.VErr('Pick one of the offered fares');
   const conf = `RT${C.token().replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 5)}`;
   fare.legs.forEach((l, i) => insFlight(c.id, { airline: l.airline, flight_no: l.flight_no, from_airport: l.from_airport, to_airport: l.to_airport,
