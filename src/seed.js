@@ -10,7 +10,7 @@ const CONTRACTOR_PW = 'Deploy!2026';
 function seed() {
   const T = today();
   const d = (n) => fmt(addDays(T, n));
-  db.exec(`DELETE FROM sessions; DELETE FROM push_subs; DELETE FROM alerts; DELETE FROM uploads; DELETE FROM flights;
+  db.exec(`DELETE FROM sessions; DELETE FROM push_subs; DELETE FROM checkins; DELETE FROM admin_alerts; DELETE FROM alerts; DELETE FROM uploads; DELETE FROM flights;
     DELETE FROM blockers; DELETE FROM documents; DELETE FROM profiles; DELETE FROM users; DELETE FROM contractors;
     DELETE FROM destination_requirements; DELETE FROM destinations; DELETE FROM requirement_types; DELETE FROM audit_log;`);
 
@@ -70,7 +70,10 @@ function seed() {
     ['Wes Calloway', 'RT-1006', 'Yellow — annual medical lapses before next rotation', 'Erbil, Iraq', 20, { 'Medical Fitness Clearance': 130 }, null, null, 'SAT', 'AUS'],
     ['John Doe', 'RT-1007', 'D · Red — missing yellow fever shot (live fix demo)', 'Camp Lemonnier, Djibouti', 32, { 'Yellow Fever Vaccine': 'missing' }, null, null, 'MEM', 'LIT'],
     ['Sam Kowalski', 'RT-1008', 'C · Red — expired passport + missing Iraq visa', 'Erbil, Iraq', 15, { 'Passport': -10, 'Iraq Work Visa': 'missing' }, null, null, 'MSY', 'BTR'],
-    ['Trent Vaughn', 'RT-1009', 'Red — manual hold (admin override)', 'Camp Arifjan, Kuwait', 25, { 'Background Check': 'in_progress' }, 'red', 'Pending background re-investigation', 'OKC', 'TUL'],
+    ['Trent Vaughn', 'RT-1009', 'Red — background check in progress + HR hold', 'Camp Arifjan, Kuwait', 25, { 'Background Check': 'in_progress' }, 'red', 'Pending background re-investigation', 'OKC', 'TUL'],
+    ['Ray Castillo', 'RT-1010', 'Green — deployed now (Erbil), checking in', 'Erbil, Iraq', -15, {}, null, null, 'ELP', 'ABQ'],
+    ['Luis Fontaine', 'RT-1011', 'Green — deployed now (Djibouti), checking in', 'Camp Lemonnier, Djibouti', -30, {}, null, null, 'JAX', 'SAV'],
+    ['Mike Brennan', 'RT-1012', 'Green — deployed now (Niger), check-in OVERDUE', 'Niamey, Niger', -10, {}, null, null, 'TUS', 'PHX'],
   ];
   const reqsFor = db.prepare('SELECT rt.* FROM requirement_types rt JOIN destination_requirements dr ON dr.requirement_type_id = rt.id WHERE dr.destination_id = ?');
   const ids = {};
@@ -103,20 +106,32 @@ function seed() {
     const destCountry = dn.split(', ')[1];
     prof.run(cid, encJSON({
       personal: { legal_first: fn, legal_middle: '', legal_last: ln.join(' '), preferred_name: '', dob: fmt(addDays(T, -365 * (29 + i * 2) - i * 41)),
-        place_of_birth: ['Houston, TX', 'Fort Worth, TX', 'Macon, GA', 'El Paso, TX', 'Pueblo, CO', 'San Antonio, TX', 'Beaumont, TX', 'Slidell, LA', 'Tulsa, OK'][i],
+        place_of_birth: ['Houston, TX', 'Fort Worth, TX', 'Macon, GA', 'El Paso, TX', 'Pueblo, CO', 'San Antonio, TX', 'Beaumont, TX', 'Slidell, LA', 'Tulsa, OK'][i % 9],
         citizenship: 'United States', second_citizenship: '', gender: name === 'Dana Whitfield' || name === 'Brianna Holt' ? 'Female' : 'Male',
-        phone, email, address: { line1: `${100 + i * 111} Demo Ranch Rd`, line2: '', city: ['Katy', 'Arlington', 'Warner Robins', 'Killeen', 'Colorado Springs', 'New Braunfels', 'Lake Charles', 'Mandeville', 'Norman'][i],
-          state: ['TX', 'TX', 'GA', 'TX', 'CO', 'TX', 'LA', 'LA', 'OK'][i], postal: String(70000 + i * 1111), country: 'USA' } },
+        phone, alt_phone: i % 2 ? '' : `(555) 01${String(i).padStart(2, '0')}-9${100 + i * 3}`, email: `${first}.${ln.join('').toLowerCase()}@example.com`, address: { line1: `${100 + i * 111} Demo Ranch Rd`, line2: '', city: ['Katy', 'Arlington', 'Warner Robins', 'Germantown', 'Colorado Springs', 'New Braunfels', 'Collierville', 'Mandeville', 'Norman'][i % 9],
+          state: ['TX', 'TX', 'GA', 'TN', 'CO', 'TX', 'TN', 'LA', 'OK'][i % 9], postal: ['77494', '76010', '31088', '38138', '80903', '78130', '38017', '70448', '73069'][i % 9], country: 'USA' } },
       travel: { home_airport: home, alt_airport: alt || '' },
-      emergency_contacts: [{ name: `Pat ${ln.join(' ')}`, relationship: 'Spouse', phone: `(555) 02${String(i).padStart(2, '0')}-3100`, email: '' }],
+      emergency_contacts: [
+        { name: `${['Pat', 'Chris', 'Jordan', 'Maria', 'Sam', 'Lee', 'Jane', 'Alex', 'Kim'][i % 9]} ${ln.join(' ')}`, relationship: ['Spouse', 'Husband', 'Wife', 'Wife', 'Mother', 'Spouse', 'Wife', 'Brother', 'Wife'][i % 9],
+          phone: `(555) 02${String(i).padStart(2, '0')}-3100`, alt_phone: `(555) 02${String(i).padStart(2, '0')}-3199`, email: `family${i + 1}@example.com`, address: `Same as contractor` },
+        ...(i % 3 !== 2 ? [{ name: `${['Ron', 'Linda', 'Gary', 'Rosa', 'Tom', 'Deb', 'Carl', 'Nina', 'Walt'][i % 9]} ${ln.join(' ')}`,
+          relationship: 'Parent', phone: `(555) 03${String(i).padStart(2, '0')}-4200`, alt_phone: '', email: `parent${i + 1}@example.com`, address: `${200 + i * 17} Example Ave, Springfield, ${['TX', 'TX', 'GA', 'TN', 'CO', 'TX', 'TN', 'LA', 'OK'][i % 9]} 00000` }] : []),
+      ],
       passport: pp.Passport ? { number: `DEMO${pp.Passport.last4.padStart(5, '0')}`, country: 'United States', issued: pp.Passport.issued, expires: pp.Passport.expires, place_of_issue: 'U.S. Department of State' } : {},
-      visas: Object.entries(pp).filter(([k]) => /Visa/.test(k)).map(([k, v]) => ({ country: destCountry, type: k, number: `V-DEMO-${v.last4}`, issued: v.issued, expires: v.expires })),
+      visas: Object.entries(pp).filter(([k]) => /Visa/.test(k)).map(([k, v]) => ({ country: destCountry, type: k, number: `V-DEMO-${v.last4}`, issued: v.issued, expires: v.expires, entries: i % 2 ? 'Single' : 'Multiple', upload: null })),
+      physical: pp['Medical Fitness Clearance'] ? { last_exam: pp['Medical Fitness Clearance'].issued, expires: pp['Medical Fitness Clearance'].expires, provider: 'Company Clinic (demo)', upload: null }
+        : { last_exam: d(-120 - i * 9), expires: d(245 - i * 9), provider: 'Company Clinic (demo)', upload: null },
+      description: { height_ft: ['5', '5', '6', '5', '5', '6', '5', '6', '6'][i % 9], height_in: ['11', '6', '1', '9', '4', '2', '10', '0', '3'][i % 9], weight_lbs: ['205', '140', '190', '178', '128', '215', '185', '230', '198'][i % 9],
+        eye_color: ['Brown', 'Blue', 'Hazel', 'Brown', 'Green', 'Blue', 'Brown', 'Gray', 'Brown'][i % 9], hair_color: ['Black', 'Blond', 'Brown', 'Black', 'Red', 'Brown', 'Brown', 'Bald', 'Gray'][i % 9] },
+      medications: [[{ name: 'Lisinopril', dose: '10 mg', frequency: 'Once daily' }], [], [{ name: 'Cetirizine', dose: '10 mg', frequency: 'As needed' }], [], [{ name: 'Levothyroxine', dose: '50 mcg', frequency: 'Once daily' }],
+        [{ name: 'Atorvastatin', dose: '20 mg', frequency: 'Once daily' }, { name: 'Ibuprofen', dose: '400 mg', frequency: 'As needed' }], [], [{ name: 'Omeprazole', dose: '20 mg', frequency: 'Once daily' }], [{ name: 'Metformin', dose: '500 mg', frequency: 'Twice daily' }]][i % 9],
       gov_id: pp["Government ID / Driver's License"] ? { type: "Driver's License", number: `DL-DEMO-${pp["Government ID / Driver's License"].last4}`, state: 'TX', expires: pp["Government ID / Driver's License"].expires } : {},
       immunizations: Object.entries(pp).filter(([k]) => destReqs.find((r) => r.name === k && r.category === 'immunization'))
         .map(([k, v]) => ({ vaccine: k, dates: v.issued, expires: v.expires, notes: '' })),
-      medical: { blood_type: ['O+', 'A+', 'B+', 'O-', 'A-', 'AB+', 'O+', 'B-', 'A+'][i], allergies: i % 3 === 0 ? 'Penicillin' : 'None known', conditions: '', medications: '', notes: '' },
+      medical: { blood_type: ['O+', 'A+', 'B+', 'O-', 'A-', 'AB+', 'O+', 'B-', 'A+'][i % 9], allergies: ['Penicillin', 'None known', 'Seasonal pollen', 'Penicillin', 'Shellfish', 'None known', 'Penicillin, bee stings', 'Sulfa drugs', 'None known'][i % 9],
+        conditions: ['Controlled hypertension', 'None', 'Mild seasonal allergies', 'None', 'Hypothyroidism (controlled)', 'High cholesterol', 'None', 'GERD', 'Type 2 diabetes (controlled)'][i % 9], medications: '', notes: '' },
       clearances: pp['Medical Fitness Clearance'] ? [{ type: 'Medical Fitness', level: 'Fit for deployment', granted: pp['Medical Fitness Clearance'].issued, expires: pp['Medical Fitness Clearance'].expires }] : [],
-      employment: { employer: 'FFD Demo Services LLC', position: ['Security Specialist', 'Logistics Coordinator', 'Site Medic', 'Security Specialist', 'Supply Tech', 'Electrician', 'Generator Mechanic', 'Security Specialist', 'Team Lead'][i],
+      employment: { employer: 'FFD Demo Services LLC', position: ['Security Specialist', 'Logistics Coordinator', 'Site Medic', 'Security Specialist', 'Supply Tech', 'Electrician', 'Generator Mechanic', 'Security Specialist', 'Team Lead'][i % 9],
         employee_no: emp, supervisor: 'Ops Manager (Demo)', start_date: d(-700 - i * 90) },
     }), 'seed');
   });
@@ -133,10 +148,18 @@ function seed() {
   al.run(ids['Marcus Delgado'], 'flight', 'Your flights are booked', 'IAH → DOH → EBL, confirmation QRDEMO1. Check the Flights tab.', '-2 hours', null);
   al.run(ids['Cody Ramirez'], 'readiness', 'Passport renewal needed', 'Your passport will not meet the 6-month rule for your next rotation. Start renewal after this trip.', '-1 days', null);
   al.run(ids['John Doe'], 'urgent', 'Yellow fever shot required', 'Djibouti requires a yellow fever vaccine. Upload your yellow card in the app as soon as you have it.', '-3 hours', null);
+  // Mock check-ins for deployed contractors (consented). Mike Brennan is overdue (>12h).
+  const { encJSON: enc } = require('./crypto');
+  const ci = db.prepare("INSERT INTO checkins (contractor_id, kind, loc_enc, created_at) VALUES (?,?,?,datetime('now', ?))");
+  [['Dana Whitfield', 29.1739, 48.0981, ['-26 hours', '-14 hours', '-2 hours']], ['Ray Castillo', 36.2380, 43.9631, ['-9 hours', '-1 hours']],
+    ['Luis Fontaine', 11.5470, 43.1556, ['-11 hours', '-5 hours']], ['Mike Brennan', 13.4817, 2.1834, ['-40 hours', '-20 hours']]].forEach(([n, lat, lng, times], k) => {
+    db.prepare("UPDATE contractors SET tracking_consent = 1, tracking_consent_at = datetime('now', '-9 days') WHERE id = ?").run(ids[n]);
+    times.forEach((t, j) => ci.run(ids[n], j === times.length - 1 ? 'checkin' : 'auto', enc({ lat: lat + (j - 1) * 0.004 + k * 0.001, lng: lng + (j - 1) * 0.003, acc: 25 + j * 10 }), t));
+  });
   db.meta.set('seed_version', SEED_VERSION);
   return { ids };
 }
 
-const SEED_VERSION = '3'; // bump when demo data shape changes; demo servers reseed on boot
+const SEED_VERSION = '6'; // bump when demo data shape changes; demo servers reseed on boot
 module.exports = { seed, ADMIN, CONTRACTOR_PW, SEED_VERSION };
 if (require.main === module) { seed(); console.log('Seeded.'); }

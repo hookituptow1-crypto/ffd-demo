@@ -13,7 +13,7 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
     p.on('pageerror', (e) => errs.push(`${email}: ${e.message}`));
     p.on('console', (m) => { if (m.type() === 'error' && !/401/.test(m.text())) errs.push(`${email}: ${m.text()}`); });
     p.on('dialog', (d) => d.accept());
-    await p.goto(BASE + '/'); await p.fill('#email', email); await p.fill('#pw', pw); await p.click('form button'); await p.waitForURL(/app|admin/);
+    await p.goto(BASE + '/'); await p.fill('#email', email); await p.fill('#pw', pw); await p.click('form button'); await p.waitForURL(/app|admin/).catch(() => {}); await p.waitForSelector('.verdict, .tile, .head', { timeout: 30000 });
     await p.waitForTimeout(900); return p;
   }
   const snap = (p, f, full = false) => p.screenshot({ path: `screens/${f}`, fullPage: full });
@@ -49,8 +49,8 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
   // --- Admin ---
   a = await session(...ADMIN, desk);
   await snap(a, '10-admin-dashboard.png');
-  ok('Admin board shows 9 contractors', (await a.textContent('.tile .n')) === '9');
-  ok('Board counts 2 green / 4 yellow / 3 red', (await a.textContent('.tile.green .n')) === '2' && (await a.textContent('.tile.yellow .n')) === '4' && (await a.textContent('.tile.red .n')) === '3');
+  ok('Admin board shows 12 contractors', (await a.textContent('.tile .n')) === '12');
+  ok('Board counts 5 green / 4 yellow / 3 red', (await a.textContent('.tile.green .n')) === '5' && (await a.textContent('.tile.yellow .n')) === '4' && (await a.textContent('.tile.red .n')) === '3');
   await a.click('.tile.red'); await a.waitForTimeout(400); ok('Red filter shows 3 rows', (await a.$$('#rows tr')).length === 3); await snap(a, '11-admin-filter-red.png');
   await a.goto(BASE + '/admin.html#/scenarios'); await a.waitForTimeout(800); await snap(a, '12-admin-demo-scenarios.png', true);
 
@@ -106,8 +106,7 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
   await snap(p, '32-john-green-after.png');
   // Intake form
   await p.click('[data-tab="profile"]'); await p.waitForTimeout(700);
-  await p.fill('[data-f="medical.allergies"]', 'Penicillin, bee stings').catch(() => {});
-  await p.click('summary:has-text("Medical")'); await p.fill('[data-f="medical.allergies"]', 'Penicillin, bee stings');
+  await p.locator('summary:has-text("Confidential medical")').first().click(); await p.fill('[data-f="medical.allergies"]', 'Penicillin, bee stings');
   await p.click('#save'); await p.waitForTimeout(800);
   await p.click('[data-tab="profile"]'); await p.waitForTimeout(700); await p.click('summary:has-text("Passport")');
   await snap(p, '33-john-intake-form.png', true);
@@ -179,6 +178,48 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
   const tb = await a.textContent('.bubble.bot:last-child');
   ok('Assistant searches from Tyler home MEM + alternate BNA', tb.includes('MEM (home)') && tb.includes('BNA (alternate)'));
   await snap(a, '56-assistant-tyler-from-mem.png', true);
+
+  // --- Intake: uploads, contact, emergency, physical description, confidential medical ---
+  p = await session('cody@ffd.demo', PW, phone);
+  await p.click('[data-tab="profile"]'); await p.waitForTimeout(700);
+  ok('Confidential medical section labelled', (await p.textContent('#pf')).includes('Confidential medical'));
+  await p.click('summary:has-text("Government ID")');
+  await p.setInputFiles('input[data-up="gov_id.front_upload"]', 'tools/demo-yellow-card.png'); await p.waitForTimeout(900);
+  await p.setInputFiles('input[data-up="gov_id.back_upload"]', 'tools/demo-yellow-card.png'); await p.waitForTimeout(900);
+  await p.click('summary:has-text("Physical description")'); await p.selectOption('[data-f="description.eye_color"]', 'Hazel');
+  await p.click('summary:has-text("Contact info")'); await p.fill('[data-f="personal.alt_phone"]', '(555) 0199-0000');
+  await snap(p, '60-cody-intake-sections.png', true);
+  await p.click('#save'); await p.waitForTimeout(900);
+  await p.click('[data-tab="profile"]'); await p.waitForTimeout(700); await p.click('summary:has-text("Government ID")');
+  ok('ID front/back uploads saved to profile', (await p.$$('summary:has-text("Government ID") ~ .body a[href^="/api/uploads/"]')).length === 2);
+  await p.locator('summary:has-text("Confidential medical")').first().click();
+  await snap(p, '61-cody-confidential-medical.png', true);
+  await p.context().close();
+  await a.goto(BASE + `/admin.html#/c/${ids['Cody Ramirez']}`); await a.waitForTimeout(700);
+  ok('Admin detail shows emergency contacts', (await a.textContent('.main')).includes('Emergency contacts') && (await a.textContent('.main')).includes('Maria Ramirez'));
+  await snap(a, '62-admin-emergency-contact.png');
+  await a.goto(BASE + `/admin.html#/c/${ids['Cody Ramirez']}/profile`); await a.waitForTimeout(700);
+  ok('Admin sees contractor edits (eye color Hazel, alt phone)', (await a.inputValue('[data-f="description.eye_color"]')) === 'Hazel' && (await a.inputValue('[data-f="personal.alt_phone"]')) === '(555) 0199-0000');
+  await snap(a, '63-admin-full-intake.png', true);
+
+  // --- Deployed check-in & location ---
+  { const ctx = await b.newContext({ viewport: phone, deviceScaleFactor: 2, permissions: ['geolocation'], geolocation: { latitude: 36.2412, longitude: 43.9701, accuracy: 30 } });
+    p = await ctx.newPage(); p.on('dialog', (d) => d.accept());
+    await p.goto(BASE + '/'); await p.fill('#email', 'ray@ffd.demo'); await p.fill('#pw', PW); await p.click('form button'); await p.waitForSelector('#trk');
+    ok('Deployed contractor sees check-in card', await p.isVisible('#trkIn'));
+    await p.click('#trkIn'); await p.waitForTimeout(1200);
+    ok('Check-in recorded', (await p.textContent('#trk')).includes('min ago'));
+    await p.locator('#trk').scrollIntoViewIfNeeded(); await snap(p, '70-ray-checkin.png');
+    await p.click('#sos'); await p.fill('#sosM', 'Demo SOS — vehicle breakdown'); await snap(p, '71-ray-sos-confirm.png'); await p.click('#sosGo'); await p.waitForTimeout(1000);
+    await ctx.close(); }
+  p = await session('marcus@ffd.demo', PW, phone);
+  ok('Non-deployed contractor has no check-in card', !(await p.$('#trk'))); await p.context().close();
+  await a.goto(BASE + '/admin.html#/map'); await a.waitForTimeout(2500);
+  ok('Admin SOS banner shows', (await a.textContent('#sosBar')).includes('SOS from Ray Castillo'));
+  ok('Map shows 4 deployed pins', (await a.$$('.leaflet-interactive')).length >= 4);
+  ok('Mike Brennan flagged overdue', (await a.textContent('tr:has-text("Mike Brennan")')).includes('Overdue'));
+  await snap(a, '72-admin-deployed-map.png', true);
+  await a.click('[data-ack]'); await a.waitForTimeout(600);
 
   await a.goto(BASE + '/admin.html#/destinations'); await a.waitForTimeout(600); await snap(a, '40-admin-destinations.png');
   await a.goto(BASE + '/admin.html#/audit'); await a.waitForTimeout(600); await snap(a, '41-admin-audit-log.png');

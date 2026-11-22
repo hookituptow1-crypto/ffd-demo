@@ -167,3 +167,26 @@ db.meta = {
   get: (k) => (db.prepare('SELECT v FROM meta WHERE k = ?').get(k) || {}).v,
   set: (k, v) => db.prepare('INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v').run(k, String(v)),
 };
+// ---- deployed check-in & location module ----
+addCol('contractors', 'tracking_consent', 'INTEGER NOT NULL DEFAULT 0');
+addCol('contractors', 'tracking_consent_at', 'TEXT');
+db.exec(`
+CREATE TABLE IF NOT EXISTS checkins (
+  id INTEGER PRIMARY KEY,
+  contractor_id INTEGER NOT NULL REFERENCES contractors(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('checkin','auto','sos')),
+  loc_enc TEXT,                     -- AES-256-GCM encrypted {lat,lng,acc}
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS checkins_c ON checkins (contractor_id, created_at);
+CREATE TABLE IF NOT EXISTS admin_alerts (
+  id INTEGER PRIMARY KEY,
+  contractor_id INTEGER REFERENCES contractors(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'sos',
+  title TEXT NOT NULL,
+  body TEXT DEFAULT '',
+  checkin_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  ack_at TEXT, ack_by TEXT
+);
+`);

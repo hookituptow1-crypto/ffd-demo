@@ -87,7 +87,9 @@ function subReadiness(d) {
         <td>${i.document ? (i.has_expiry ? fdate(i.document.expires) : 'No expiry') : '—'}</td>
         <td class="small">${esc(i.message)}${i.is_check && i.document ? `<div class="mut">${esc(i.document.provider || '')}${i.document.reference ? ` · ref ${esc(i.document.reference)}` : ''}</div>` : ''}${i.document && !i.document.verified ? `<div><span class="pill blue">self-reported</span></div>` : ''}${i.document && i.document.upload_id ? ` <a href="/api/uploads/${i.document.upload_id}" target="_blank" rel="noopener">photo</a>` : ''}</td>
         <td class="row">${i.document && !i.document.verified ? `<button class="btn sm pri" data-verify="${i.requirement_type_id}">Verify</button>` : ''}<button class="btn sm" data-doc="${i.requirement_type_id}">Edit</button></td></tr>`).join('')}</tbody></table></div>
-    <div><div class="card"><h2>Manual override</h2><p class="small mut">Overrides the computed light. The reason is shown to the contractor.</p>
+    <div>${(() => { const ecs = (d.profile.emergency_contacts || []).filter((e) => e.name); return `<div class="card mb"><h2>☎️ Emergency contact${ecs.length > 1 ? 's' : ''}</h2>${ecs.map((e, i) => `<div class="${i ? 'ec' : 'mt'}"><b>${esc(e.name)}</b> <span class="mut small">· ${esc(e.relationship)} · ${i ? 'secondary' : 'primary'}</span>
+      <div class="small">📱 ${esc(e.phone || '—')}${e.alt_phone ? ` · ☎ ${esc(e.alt_phone)}` : ''}${e.email ? ` · ✉ ${esc(e.email)}` : ''}</div>${e.address ? `<div class="small mut">${esc(e.address)}</div>` : ''}</div>`).join('') || '<p class="small">⚠️ No emergency contact on file</p>'}</div>`; })()}
+      <div class="card"><h2>Manual override</h2><p class="small mut">Overrides the computed light. The reason is shown to the contractor.</p>
         <div class="grid2"><div><label>Status</label><select id="ovS"><option value="">Automatic</option>${['green', 'yellow', 'red'].map((s) => `<option ${c.override_status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
         <div><label>Reason</label><input id="ovR" value="${esc(c.override_reason)}"></div></div><button class="btn mt" id="ovSave">Save override</button></div>
       <div class="card mt"><h2>Other blockers</h2><p class="small mut">Any active blocker makes the contractor RED (e.g. HR hold, pending medical review).</p>
@@ -147,7 +149,7 @@ function subProfile(d) {
       <button class="btn pri" id="pSave">Save profile</button></div><div id="pf"></div>
     <div class="card mt"><h3>Document photos</h3>${d.uploads.map((u) => `<div class="row small mt"><span>📄</span><a href="/api/uploads/${u.id}" target="_blank" rel="noopener">${esc(u.label)}</a><span class="mut">by ${esc(u.uploaded_by)} · ${esc(u.created_at)}</span></div>`).join('') || '<p class="small mut">None uploaded.</p>'}
       <div class="row mt"><input id="upL" placeholder="Label"><input id="upF" type="file" accept="image/jpeg,image/png,image/webp,application/pdf"><button class="btn" id="upB">Upload</button></div></div>`;
-  const form = renderProfileForm($('#pf'), d.profile, { open: true });
+  const form = renderProfileForm($('#pf'), d.profile, { open: true, uploadUrl: `/api/admin/contractors/${c.id}/uploads` });
   $('#pSave').addEventListener('click', () => guard(async () => { await api('PUT', `/api/admin/contractors/${c.id}/profile`, { profile: form.collect() }); toast('Profile saved'); }));
   $('#upB').addEventListener('click', () => guard(async () => { const f = $('#upF').files[0]; if (!f) throw new Error('Choose a file'); await api('POST', `/api/admin/contractors/${c.id}/uploads`, await fileToPayload(f, $('#upL').value || f.name)); detail(c.id, 'profile'); }));
 }
@@ -272,6 +274,7 @@ async function scenarios() {
       ${card('John Doe', 'C/D · Red — missing yellow fever shot → live fix', 'Djibouti requires yellow fever. <b>Walk-through:</b> 1) Ask the assistant “John Doe needs to go to Africa” → booking is BLOCKED. 2) Log in as John, tap <i>Fix now</i> on Yellow Fever, enter shot date, attach a photo → light flips to GREEN. 3) Ask the assistant again → fares can be approved and booked; flights appear in John’s app with an alert.')}
       ${card('Tyler Brandt', 'Green — AI booking allowed', 'Cleared for Djibouti. “Tyler Brandt needs to go to Africa” returns ranked fares you can approve.')}
       ${card('Dana Whitfield', 'Yellow — background check renewal due', 'Background check (valid 1 year from completion) expires before her next rotation ends. Countdown shown in her app; open her record → Background Check to renew it.')}
+      ${card('Mike Brennan', 'Deployed — check-in overdue', 'Deployed in Niamey with location sharing on, but no check-in for 20 h (window 12 h) → red OVERDUE pin on the <a href="#/map">Deployed map</a>. Log in as Ray Castillo (deployed, Erbil) to try Check in / SOS.')}
       ${card('Trent Vaughn', 'Red — background check in progress + HR hold', 'Background re-investigation is <i>in progress</i> (RED until cleared), plus an admin blocker/override with the reason shown in his app.')}
     </div>
     <div class="card mt"><h3>Try these too</h3><p class="small mut">• Edit one of Marcus’s flights → he gets an automatic “Flight changed” alert.<br>• Send an alert to all RED contractors from <a href="#/alerts">Send alert</a>.<br>• Home airports: every contractor has a primary + alternate (type-ahead picker in My info / admin). The assistant searches fares from both — John departs from MEM.<br>• Add a requirement to a destination in <a href="#/destinations">Destinations</a> and watch statuses recompute.</p></div>`;
@@ -311,6 +314,47 @@ async function destinations() {
   $$('[data-ed]').forEach((b) => b.addEventListener('click', () => destModal(ds.find((d) => d.id === +b.dataset.ed))));
   $$('[data-er]').forEach((b) => b.addEventListener('click', () => rtModal(rts.find((r) => r.id === +b.dataset.er))));
 }
+// ---------------- Deployed map (opt-in check-in module) ----------------
+let MAP = null;
+const localTime = (s) => (s ? new Date(s.replace(' ', 'T') + 'Z').toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }) : '—');
+async function mapPage() {
+  const d = await api('GET', '/api/admin/tracking'); const st = d.settings;
+  main().innerHTML = `<div class="head"><h1>🗺️ Deployed map</h1><span class="pill ${st.enabled ? 'green' : 'gray'}">${st.enabled ? 'Module on' : 'Module off'}</span></div>
+    <div class="card mb"><div class="row wrap"><label class="chk"><input type="checkbox" id="sEn" ${st.enabled ? 'checked' : ''}> Enable deployed check-in & location module</label>
+      <div class="row"><label class="small">Overdue after (h)</label><input id="sOd" type="number" min="1" max="168" value="${st.overdue_hours}" class="w80"></div>
+      <div class="row"><label class="small">Keep locations (days)</label><input id="sRt" type="number" min="1" max="365" value="${st.retention_days}" class="w80"></div>
+      <button class="btn right" id="sSave">Save settings</button></div>
+      <p class="small mut">Opt-in only, active only during a rotation. Locations are encrypted at rest, purged after the retention window, and every view of this page is audit-logged. Browser app shares while open; background tracking needs the native app.</p></div>
+    <div class="cols"><div id="map"></div><div class="card"><h2>Deployed now (${d.deployed.length})</h2>
+      <table class="mt"><thead><tr><th>Contractor</th><th>Last check-in</th><th></th></tr></thead><tbody>
+      ${d.deployed.map((c) => `<tr class="click" data-pin="${c.id}"><td><b>${esc(c.name)}</b><div class="small mut">${esc(c.destination)}</div></td>
+        <td class="small">${c.consent ? `${localTime(c.last_checkin)}<div class="mut">${c.hours_since === null ? 'no check-ins' : `${c.hours_since} h ago`}</div>` : '<span class="mut">not opted in</span>'}</td>
+        <td>${c.overdue ? '<span class="pill red">Overdue</span>' : c.consent ? '<span class="pill green">OK</span>' : '<span class="pill gray">Off</span>'}</td></tr>`).join('') || '<tr><td colspan="3" class="mut">Nobody deployed right now.</td></tr>'}</tbody></table>
+      <h3 class="mt">SOS history</h3>${d.sos.map((a) => `<div class="alert-item"><div class="t">🆘 <b>${esc(a.title)}</b>${a.ack_at ? `<span class="pill gray">ack ${esc(a.ack_by || '')}</span>` : '<span class="pill red">OPEN</span>'}</div><div class="small">${esc(a.body)}</div><div class="small mut">${localTime(a.created_at)}</div></div>`).join('') || '<p class="small mut">None.</p>'}</div></div>`;
+  $('#sSave').addEventListener('click', () => guard(async () => { await api('PUT', '/api/admin/settings', { tracking: { enabled: $('#sEn').checked, overdue_hours: +$('#sOd').value, retention_days: +$('#sRt').value } }); toast('Settings saved'); mapPage(); }));
+  if (MAP) { MAP.remove(); MAP = null; }
+  if (!window.L) { $('#map').textContent = 'Map library failed to load'; return; }
+  MAP = L.map('map', { worldCopyJump: true }).setView([22, 30], 3);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '&copy; OpenStreetMap contributors', referrerPolicy: 'strict-origin-when-cross-origin' }).addTo(MAP);
+  const pins = {}; const pts = [];
+  d.deployed.filter((c) => c.loc).forEach((c) => {
+    const color = c.overdue ? '#ff4d4d' : '#3fd46b';
+    pins[c.id] = L.circleMarker([c.loc.lat, c.loc.lng], { radius: 10, color: '#000', weight: 2, fillColor: color, fillOpacity: 0.95 }).addTo(MAP)
+      .bindPopup(`<b>${esc(c.name)}</b><br>${esc(c.destination)}<br>Last check-in: ${esc(localTime(c.last_checkin))}${c.overdue ? '<br><b class="od">OVERDUE</b>' : ''}`);
+    pins[c.id].bindTooltip(`${esc(c.name.split(' ')[0])}${c.overdue ? ' ⚠️' : ''}`, { permanent: true, direction: 'top', offset: [0, -10] });
+    pts.push([c.loc.lat, c.loc.lng]);
+  });
+  d.sos.filter((a) => !a.ack_at && a.loc).forEach((a) => L.circleMarker([a.loc.lat, a.loc.lng], { radius: 14, color: '#fff', weight: 3, fillColor: '#ff0000', fillOpacity: 1 }).addTo(MAP).bindPopup(`🆘 ${esc(a.title)}`));
+  if (pts.length) MAP.fitBounds(pts, { padding: [40, 40], maxZoom: 6 });
+  $$('[data-pin]').forEach((tr) => tr.addEventListener('click', () => { const m = pins[tr.dataset.pin]; if (m) { MAP.setView(m.getLatLng(), 12); m.openPopup(); } }));
+}
+async function sosPoll() {
+  try {
+    const { open } = await api('GET', '/api/admin/sos/open');
+    $('#sosBar').innerHTML = open.map((a) => `<div class="sos-bar"><b>🆘 ${esc(a.title)}</b><span class="small grow">${esc(a.body)} · ${localTime(a.created_at)}</span><a class="btn sm" href="#/map">Map</a><button class="btn sm" data-ack="${a.id}">Acknowledge</button></div>`).join('');
+    $$('[data-ack]').forEach((b) => b.addEventListener('click', () => guard(async () => { await api('POST', `/api/admin/sos/${b.dataset.ack}/ack`); sosPoll(); })));
+  } catch {}
+}
 async function audit() {
   const { log } = await api('GET', '/api/admin/audit');
   main().innerHTML = `<div class="head"><h1>Audit log</h1><span class="mut small">last 200 events · times UTC</span></div><div class="card"><table><thead><tr><th>When (UTC)</th><th>User</th><th>Action</th><th>Details</th><th>IP</th></tr></thead><tbody>
@@ -321,6 +365,7 @@ async function route() {
   const h = location.hash.slice(1) || '/'; const [p, qs] = h.split('?'); const parts = p.split('/').filter(Boolean);
   const nav = parts[0] === 'c' ? 'dash' : parts[0] || 'dash';
   $$('[data-nav]').forEach((a) => a.classList.toggle('on', a.dataset.nav === nav));
+  sosPoll();
   await guard(async () => {
     if (parts[0] === 'c') return detail(+parts[1], parts[2] || 'readiness');
     if (parts[0] === 'scenarios') return scenarios();
@@ -328,9 +373,10 @@ async function route() {
     if (parts[0] === 'alerts') return alertsPage(new URLSearchParams(qs || '').get('to'));
     if (parts[0] === 'destinations') return destinations();
     if (parts[0] === 'audit') return audit();
+    if (parts[0] === 'map') return mapPage();
     return dash();
   });
 }
 $('#logout').addEventListener('click', (e) => { e.preventDefault(); logout(); });
 window.addEventListener('hashchange', route);
-(async () => { if (await requireRole('admin')) route(); })();
+(async () => { if (await requireRole('admin')) { route(); sosPoll(); setInterval(sosPoll, 15000); } })();

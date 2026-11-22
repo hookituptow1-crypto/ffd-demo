@@ -31,9 +31,9 @@ app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use((req, res, next) => {
   res.set({
-    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob: https://tile.openstreetmap.org; style-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY',
-    'Permissions-Policy': 'camera=(self), geolocation=(), microphone=()', 'Cross-Origin-Opener-Policy': 'same-origin',
+    'Permissions-Policy': 'camera=(self), geolocation=(self), microphone=()', 'Cross-Origin-Opener-Policy': 'same-origin',
   });
   if (req.secure) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   next();
@@ -105,12 +105,12 @@ const attempts = new Map(); // ip -> [timestamps]
 app.post('/api/login', wrap(async (req, res) => {
   const ip = req.ip || 'x'; const now = Date.now();
   const list = (attempts.get(ip) || []).filter((t) => now - t < 15 * 60000);
-  if (list.length >= 20) return res.status(429).json({ error: 'Too many attempts. Try again in 15 minutes.' });
-  list.push(now); attempts.set(ip, list);
+  if (list.length >= 20) return res.status(429).json({ error: 'Too many failed attempts. Try again in 15 minutes.' });
+  const noteFail = () => { list.push(now); attempts.set(ip, list); }; // only failed logins count toward the per-IP limit
   const email = V.str(req.body.email, 120, { required: true, name: 'Email' });
   const password = V.str(req.body.password, 200, { required: true, name: 'Password' });
   const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-  const fail = () => res.status(401).json({ error: 'Email or password is incorrect' });
+  const fail = () => { noteFail(); return res.status(401).json({ error: 'Email or password is incorrect' }); };
   if (!u) { C.hashPassword(password); return fail(); } // equalize timing
   if (u.locked_until && new Date(u.locked_until) > new Date()) return res.status(423).json({ error: 'Account temporarily locked after failed attempts. Try again later.' });
   if (!C.verifyPassword(password, u.password_hash)) {
@@ -164,6 +164,8 @@ app.post('/api/my/alerts/read', need('contractor'), (req, res) => {
 app.get('/api/my/profile', need('contractor'), (req, res) => res.json({ profile: getProfile(req.user.contractor_id), uploads: listUploads(req.user.contractor_id) }));
 app.put('/api/my/profile', need('contractor'), (req, res) => {
   const p = V.profile(req.body.profile);
+  const ec = p.emergency_contacts[0];
+  if (!ec || !ec.name || !ec.phone) throw new V.VErr('Primary emergency contact name and mobile phone are required');
   saveProfile(req.user.contractor_id, p, 'contractor');
   const synced = syncProfileToDocs(req.user.contractor_id, p);
   audit(req, 'profile_update_self', `contractor ${req.user.contractor_id}; synced: ${synced.join(', ')}`);
@@ -235,7 +237,14 @@ function defaultExpiry(rt, issued, expires) {
   if (expires || !rt.validity_days || !issued) return expires;
   return new Date(Date.parse(issued + 'T00:00:00Z') + rt.validity_days * 86400000).toISOString().slice(0, 10);
 }
+function checkUploadOwnership(cid, p) {
+  const ids = [];
+  const walk = (o, k) => { if (o && typeof o === 'object') Object.entries(o).forEach(([kk, v]) => walk(v, kk)); else if (/upload$/.test(k || '') && o) ids.push(o); };
+  walk(p);
+  for (const id of ids) if (!db.prepare('SELECT 1 FROM uploads WHERE id = ? AND contractor_id = ?').get(id, cid)) throw new V.VErr('Attached file not found');
+}
 function saveProfile(cid, p, by) {
+  checkUploadOwnership(cid, p);
   if (p.travel) db.prepare('UPDATE contractors SET home_airport = ?, alt_airport = ? WHERE id = ?').run(p.travel.home_airport || '', p.travel.alt_airport || '', cid);
   db.prepare(`INSERT INTO profiles (contractor_id, data_enc, updated_by, updated_at) VALUES (?,?,?,datetime('now'))
     ON CONFLICT(contractor_id) DO UPDATE SET data_enc=excluded.data_enc, updated_by=excluded.updated_by, updated_at=excluded.updated_at`).run(cid, C.encJSON(p), by);
@@ -248,21 +257,68 @@ function syncProfileToDocs(cid, p) {
     if (rt.is_check) continue; // background checks are never self-cleared from the intake form
     let entry = null;
     const kw = (rt.keyword || '').toLowerCase();
-    if (rt.category === 'passport' && p.passport.number) entry = { number: p.passport.number, issued: p.passport.issued, expires: p.passport.expires };
-    else if (rt.category === 'id' && p.gov_id.number) entry = { number: p.gov_id.number, issued: null, expires: p.gov_id.expires };
-    else if (rt.category === 'visa') { const v = p.visas.find((x) => `${x.country} ${x.type}`.toLowerCase().includes(kw)); if (v) entry = { number: v.number, issued: v.issued, expires: v.expires }; }
+    if (rt.category === 'passport' && p.passport.number) entry = { number: p.passport.number, issued: p.passport.issued, expires: p.passport.expires, upload_id: p.passport.photo_upload };
+    else if (rt.category === 'id' && p.gov_id.number) entry = { number: p.gov_id.number, issued: null, expires: p.gov_id.expires, upload_id: p.gov_id.front_upload };
+    else if (rt.category === 'visa') { const v = p.visas.find((x) => `${x.country} ${x.type}`.toLowerCase().includes(kw)); if (v) entry = { number: v.number, issued: v.issued, expires: v.expires, upload_id: v.upload }; }
     else if (rt.category === 'immunization') { const v = p.immunizations.find((x) => x.vaccine.toLowerCase().includes(kw)); if (v) entry = { number: '', issued: (v.dates.match(/\d{4}-\d{2}-\d{2}/g) || []).pop() || null, expires: v.expires }; }
+    else if (rt.category === 'clearance' && kw === 'medical' && p.physical && p.physical.expires) entry = { number: '', issued: p.physical.last_exam, expires: p.physical.expires, upload_id: p.physical.upload };
     else if (rt.category === 'clearance') { const v = p.clearances.find((x) => x.type.toLowerCase().includes(kw)); if (v) entry = { number: '', issued: v.granted, expires: v.expires }; }
     if (!entry || (rt.has_expiry && !entry.expires)) continue;
     const cur = docs.get(rt.id);
     const better = !cur || cur.status !== 'valid' || (rt.has_expiry && (!cur.expires || entry.expires > cur.expires));
     if (!better) continue;
     upsertDoc(cid, rt.id, { ref_last4: String(entry.number || '').slice(-4), issued: entry.issued, expires: rt.has_expiry ? entry.expires : null,
-      status: 'valid', verified: 0, source: 'contractor', notes: 'From contractor intake form' });
+      status: 'valid', verified: 0, source: 'contractor', upload_id: entry.upload_id || null, notes: 'From contractor intake form' });
     synced.push(rt.name);
   }
   return synced;
 }
+
+// --------------- deployed check-in & location (opt-in) ---------------
+const setting = (k, d) => { const v = db.meta.get(k); return v === undefined ? d : v; };
+const trackingCfg = () => ({ enabled: setting('tracking_enabled', DEMO_MODE ? '1' : '0') === '1', overdue_hours: Number(setting('tracking_overdue_hours', '12')),
+  retention_days: Number(setting('tracking_retention_days', '30')), auto_minutes: 15 });
+function isDeployed(c) { const r = readiness(c).rotation; return r.days_to_deploy <= 0 && r.days_to_deploy > -r.on; }
+function purgeCheckins() { db.prepare("DELETE FROM checkins WHERE created_at < datetime('now', ?)").run(`-${trackingCfg().retention_days} days`); }
+purgeCheckins(); setInterval(purgeCheckins, 3600000).unref();
+const lastCheckin = (cid) => db.prepare("SELECT * FROM checkins WHERE contractor_id = ? AND kind != 'sos' ORDER BY created_at DESC, id DESC LIMIT 1").get(cid);
+const decLoc = (row) => (row && row.loc_enc ? C.decJSON(row.loc_enc) : null);
+function readLoc(b) {
+  if (b.lat === undefined || b.lat === null || b.lat === '') return null;
+  const lat = Number(b.lat), lng = Number(b.lng), acc = Number(b.accuracy || 0);
+  if (!(lat >= -90 && lat <= 90) || !(lng >= -180 && lng <= 180)) throw new V.VErr('Invalid location');
+  return { lat: Math.round(lat * 1e5) / 1e5, lng: Math.round(lng * 1e5) / 1e5, acc: Math.min(Math.round(acc), 100000) };
+}
+app.get('/api/my/tracking', need('contractor'), (req, res) => {
+  const c = me(req); const cfg = trackingCfg(); const last = lastCheckin(c.id);
+  res.json({ enabled: cfg.enabled, deployed: isDeployed(c), consent: !!c.tracking_consent, consent_at: c.tracking_consent_at, auto_minutes: cfg.auto_minutes,
+    retention_days: cfg.retention_days, last_checkin: last ? last.created_at : null });
+});
+app.put('/api/my/tracking/consent', need('contractor'), (req, res) => {
+  const on = req.body.consent === true;
+  db.prepare("UPDATE contractors SET tracking_consent = ?, tracking_consent_at = CASE WHEN ? THEN datetime('now') ELSE tracking_consent_at END WHERE id = ?").run(on ? 1 : 0, on ? 1 : 0, req.user.contractor_id);
+  audit(req, on ? 'tracking_consent_on' : 'tracking_consent_off', `contractor ${req.user.contractor_id}`); res.json({ ok: true });
+});
+app.post('/api/my/checkin', need('contractor'), (req, res) => {
+  const c = me(req); const cfg = trackingCfg();
+  if (!cfg.enabled) throw Object.assign(new Error('Check-in is turned off'), { status: 409 });
+  if (!isDeployed(c)) throw Object.assign(new Error('Check-in is only active while you are deployed'), { status: 409 });
+  if (!c.tracking_consent) throw Object.assign(new Error('Turn on location sharing first'), { status: 409 });
+  const kind = req.body.kind === 'auto' ? 'auto' : 'checkin'; const loc = readLoc(req.body);
+  db.prepare('INSERT INTO checkins (contractor_id, kind, loc_enc) VALUES (?,?,?)').run(c.id, kind, loc ? C.encJSON(loc) : null);
+  if (kind === 'checkin') audit(req, 'checkin', c.name);
+  res.json({ ok: true });
+});
+// SOS always works while deployed (even without location consent); location attached if the phone provides it.
+app.post('/api/my/sos', need('contractor'), (req, res) => {
+  const c = me(req); const loc = readLoc(req.body || {});
+  const note = V.str(req.body.message, 300, { name: 'Message' });
+  const ck = Number(db.prepare("INSERT INTO checkins (contractor_id, kind, loc_enc) VALUES (?, 'sos', ?)").run(c.id, loc ? C.encJSON(loc) : null).lastInsertRowid);
+  db.prepare("INSERT INTO admin_alerts (contractor_id, kind, title, body, checkin_id) VALUES (?, 'sos', ?, ?, ?)").run(c.id, `SOS from ${c.name}`,
+    `${destName(c.destination_id)}${loc ? ` · ${loc.lat}, ${loc.lng} (±${loc.acc} m)` : ' · location unavailable'}${note ? ` · "${note}"` : ''}`, ck);
+  audit(req, 'sos', `${c.name}${loc ? '' : ' (no location)'}`);
+  res.json({ ok: true });
+});
 
 // --------------- admin ---------------
 const admin = express.Router();
@@ -472,6 +528,32 @@ admin.post('/demo/reset', (req, res) => {
   if (!DEMO_MODE) return res.status(403).json({ error: 'Demo mode is off' });
   for (const f of fs.readdirSync(UPLOAD_DIR)) fs.unlinkSync(path.join(UPLOAD_DIR, f));
   seed(); res.set('Set-Cookie', 'ffd_sid=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0'); res.json({ ok: true });
+});
+admin.get('/settings', (req, res) => res.json({ tracking: trackingCfg() }));
+admin.put('/settings', (req, res) => {
+  const t = req.body.tracking || {};
+  db.meta.set('tracking_enabled', t.enabled ? '1' : '0');
+  db.meta.set('tracking_overdue_hours', V.int(t.overdue_hours ?? 12, 1, 168, 'Overdue window (hours)'));
+  db.meta.set('tracking_retention_days', V.int(t.retention_days ?? 30, 1, 365, 'Retention (days)'));
+  purgeCheckins(); audit(req, 'settings_update', JSON.stringify(trackingCfg())); res.json({ ok: true, tracking: trackingCfg() });
+});
+admin.get('/tracking', (req, res) => {
+  const cfg = trackingCfg(); const now = Date.now();
+  const rows = db.prepare('SELECT * FROM contractors ORDER BY name').all().filter(isDeployed).map((c) => {
+    const last = lastCheckin(c.id); const loc = decLoc(last);
+    const d = db.prepare('SELECT * FROM destinations WHERE id = ?').get(c.destination_id || 0) || {};
+    const ageH = last ? (now - Date.parse(last.created_at.replace(' ', 'T') + 'Z')) / 3600000 : null;
+    return { id: c.id, name: c.name, destination: d.name || '—', consent: !!c.tracking_consent, last_checkin: last ? last.created_at : null,
+      hours_since: ageH === null ? null : Math.round(ageH * 10) / 10, overdue: c.tracking_consent ? (ageH === null || ageH > cfg.overdue_hours) : false, loc, status: readiness(c).status };
+  });
+  const sos = db.prepare('SELECT a.*, c.name FROM admin_alerts a LEFT JOIN contractors c ON c.id = a.contractor_id ORDER BY a.id DESC LIMIT 20').all().map((a) => ({ ...a, loc: decLoc(db.prepare('SELECT * FROM checkins WHERE id = ?').get(a.checkin_id || 0)) }));
+  audit(req, 'tracking_view', `${rows.length} deployed contractors`);
+  res.json({ settings: cfg, deployed: rows, sos });
+});
+admin.get('/sos/open', (req, res) => res.json({ open: db.prepare("SELECT a.id, a.title, a.body, a.created_at FROM admin_alerts a WHERE ack_at IS NULL ORDER BY id DESC").all() }));
+admin.post('/sos/:id/ack', (req, res) => {
+  db.prepare("UPDATE admin_alerts SET ack_at = datetime('now'), ack_by = ? WHERE id = ?").run(req.user.email, idParam(req.params.id));
+  audit(req, 'sos_ack', req.params.id); res.json({ ok: true });
 });
 app.use('/api/admin', admin);
 

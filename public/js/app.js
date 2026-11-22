@@ -1,5 +1,5 @@
 'use strict';
-let S = null; let tab = 'status';
+let S = null; let tab = 'status'; let T = null; let autoTimer = null;
 const VERDICT = {
   green: ['✓', 'CLEARED TO DEPLOY', 'All requirements are good through your next rotation.'],
   yellow: ['!', 'CLEARED THIS ROTATION', 'You can deploy this time — but something must be fixed before your next rotation or you can’t go.'],
@@ -7,7 +7,36 @@ const VERDICT = {
 };
 const CAT_IC = { passport: '🛂', visa: '📄', immunization: '💉', id: '🪪', clearance: '🩺', other: '📌' };
 
-async function load() { S = await api('GET', '/api/my/status'); badges(); render(); }
+async function load() { [S, T] = await Promise.all([api('GET', '/api/my/status'), api('GET', '/api/my/tracking')]); badges(); render(); startAuto(); }
+// ---- deployed check-in & location (opt-in, foreground only: a web app can't share location in the background) ----
+function getPos() {
+  return new Promise((res) => {
+    if (!navigator.geolocation) return res(null);
+    navigator.geolocation.getCurrentPosition((p) => res({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy }), () => res(null), { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+  });
+}
+function startAuto() {
+  clearInterval(autoTimer);
+  if (!(T && T.enabled && T.deployed && T.consent)) return;
+  autoTimer = setInterval(async () => { if (document.visibilityState !== 'visible') return; const pos = await getPos(); if (pos) api('POST', '/api/my/checkin', { ...pos, kind: 'auto' }).catch(() => {}); }, T.auto_minutes * 60000);
+}
+function trackingCard() {
+  if (!T || !T.enabled || !T.deployed) return '';
+  const ago = T.last_checkin ? Math.round((Date.now() - Date.parse(T.last_checkin.replace(' ', 'T') + 'Z')) / 60000) : null;
+  const agoTxt = ago === null ? 'never' : ago < 60 ? `${ago} min ago` : `${Math.round(ago / 6) / 10} h ago`;
+  return `<div class="card mt" id="trk"><div class="row"><h2>📍 Deployed check-in</h2><label class="switch right"><input type="checkbox" id="trkC" ${T.consent ? 'checked' : ''}><span></span></label></div>
+    <p class="small mut">${T.consent ? `Location sharing is <b>on</b> while you're deployed. Last check-in: <b>${agoTxt}</b>. While the app is open it also shares every ${T.auto_minutes} min.` : 'Opt in to share your location with the deployment office while you are deployed.'}</p>
+    <div class="row mt"><button class="btn pri grow" id="trkIn" ${T.consent ? '' : 'disabled'}>✅ Check in now</button><button class="btn danger grow" id="sos">🆘 SOS</button></div></div>`;
+}
+function consentModal(done) {
+  modal(`<div class="row"><h2>📍 Location sharing</h2><button class="btn sm right" data-close>✕</button></div>
+    <p>While you are <b>deployed</b>, the deployment office can see your location when you check in, and every ${T.auto_minutes} minutes while this app is open.</p>
+    <ul class="small"><li>Only active during your rotation. Off when you're home.</li><li>Only the deployment office admin can see it. Every view is logged.</li>
+    <li>Locations are encrypted and deleted after ${T.retention_days} days.</li><li>It does <b>not</b> track you in the background when the app is closed.</li><li>You can turn it off at any time. SOS works either way.</li></ul>
+    <div class="row mt"><button class="btn grow" data-close>Not now</button><button class="btn pri grow" id="cYes">I agree, turn on</button></div>`, (m, close) => {
+    $('#cYes', m).addEventListener('click', () => guard(async () => { await api('PUT', '/api/my/tracking/consent', { consent: true }); close(); toast('Location sharing on'); done(); }));
+  });
+}
 function badges() {
   const set = (id, n) => { const b = $(id); b.textContent = n; b.classList.toggle('hidden', !n); };
   set('#bellN', S.unread_alerts); set('#alN', S.unread_alerts); set('#flN', S.new_flights);
@@ -37,6 +66,7 @@ function renderStatus() {
       <div class="card"><div class="lbl">${dtd > 0 ? `Deploys in ${dtd} days` : dtd > -r.rotation.on ? 'On rotation now' : 'This rotation'}</div><div class="val">${fdate(r.rotation.start)}</div><div class="small mut">Home ${fdate(r.rotation.end)}</div></div>
       <div class="card"><div class="lbl">Next rotation</div><div class="val">${fdate(r.rotation.next_start)}</div><div class="small mut">${r.rotation.on} on / ${r.rotation.off} off</div></div>
     </div>
+    ${trackingCard()}
     <div class="card mt"><div class="row"><h2>Requirements</h2><span class="right small mut">📍 ${esc(S.contractor.destination)}</span></div>
       <div class="mt">${r.items.map((i) => `<div class="req ${i.status}"><span class="dot ${i.status}"></span><div class="grow">
         <div class="name">${CAT_IC[i.category] || ''} ${esc(i.name)}</div><div class="msg">${esc(i.message)}</div>
@@ -47,6 +77,12 @@ function renderStatus() {
       ${(() => { const f = S.flights.find((x) => x.depart_at.slice(0, 10) >= new Date().toISOString().slice(0, 10)) || S.flights[0]; return `<div class="flight mt"><div class="small mut">${esc(f.airline)} · ${esc(f.flight_no)}</div><div class="route">${esc(f.from_airport)}<span class="line"></span>${esc(f.to_airport)}</div><div class="small">${fdt(f.depart_at)} · Conf <b>${esc(f.confirmation)}</b></div></div>`; })()}</div>` : ''}
   </div>`;
   $('#banner')?.addEventListener('click', () => go('alerts'));
+  $('#trkC')?.addEventListener('change', (e) => { if (e.target.checked) { e.target.checked = false; consentModal(load); } else guard(async () => { await api('PUT', '/api/my/tracking/consent', { consent: false }); toast('Location sharing off'); load(); }); });
+  $('#trkIn')?.addEventListener('click', () => guard(async () => { const pos = await getPos(); await api('POST', '/api/my/checkin', { ...(pos || {}), kind: 'checkin' }); toast(pos ? '✅ Checked in with location' : '✅ Checked in (location unavailable)'); load(); }));
+  $('#sos')?.addEventListener('click', () => modal(`<h2>🆘 Send SOS?</h2><p>This immediately alerts the deployment office with your location.</p><label for="sosM">Message (optional)</label><input id="sosM" placeholder="What's happening?">
+    <div class="row mt"><button class="btn grow" data-close>Cancel</button><button class="btn danger grow" id="sosGo">Send SOS</button></div>`, (m, close) => {
+    $('#sosGo', m).addEventListener('click', () => guard(async () => { const pos = await getPos(); await api('POST', '/api/my/sos', { ...(pos || {}), message: $('#sosM', m).value }); close(); toast('🆘 SOS sent — the office has been alerted'); }));
+  }));
 }
 function renderFlights() {
   const groups = {};
@@ -90,7 +126,7 @@ async function renderProfile() {
       <label for="upFile">Photo or PDF (max 5 MB)</label><input id="upFile" type="file" accept="image/jpeg,image/png,image/webp,application/pdf">
       <button class="btn mt" id="upBtn">Upload</button></div></details>
     <div class="sticky-save"><button class="btn pri block" id="save">Save my information</button></div></div>`;
-  const form = renderProfileForm($('#pf'), profile, { open: 'personal' });
+  const form = renderProfileForm($('#pf'), profile, { open: 'personal', uploadUrl: '/api/my/uploads' });
   $('#save').addEventListener('click', () => guard(async () => {
     const r = await api('PUT', '/api/my/profile', { profile: form.collect() });
     toast(r.synced.length ? `Saved · updated ${r.synced.join(', ')}` : 'Saved'); await load(); tab = 'profile';
