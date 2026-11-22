@@ -50,8 +50,8 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
   // --- Admin ---
   a = await session(...ADMIN, desk);
   await snap(a, '10-admin-dashboard.png');
-  ok('Admin board shows 12 contractors', (await a.textContent('.tile .n')) === '12');
-  ok('Board counts 5 green / 4 yellow / 3 red', (await a.textContent('.tile.green .n')) === '5' && (await a.textContent('.tile.yellow .n')) === '4' && (await a.textContent('.tile.red .n')) === '3');
+  ok('Admin board shows 13 contractors', (await a.textContent('.tile .n')) === '13');
+  ok('Board counts 6 green / 4 yellow / 3 red', (await a.textContent('.tile.green .n')) === '6' && (await a.textContent('.tile.yellow .n')) === '4' && (await a.textContent('.tile.red .n')) === '3');
   await a.click('.tile.red'); await a.waitForTimeout(400); ok('Red filter shows 3 rows', (await a.$$('#rows tr')).length === 3); await snap(a, '11-admin-filter-red.png');
   await a.goto(BASE + '/admin.html#/scenarios'); await a.waitForTimeout(800); await snap(a, '12-admin-demo-scenarios.png', true);
 
@@ -140,7 +140,7 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
   await snap(p, '38-marcus-flight-changed-alert.png', true);
   // Security: contractor cannot hit admin API, cannot read others' uploads, CSRF enforced
   const sec = await p.evaluate(async () => {
-    const r1 = await fetch('/api/admin/contractors'); const r2 = await fetch('/api/uploads/1');
+    const r1 = await fetch('/api/admin/contractors'); const r2 = await fetch('/api/uploads/2');
     const r3 = await fetch('/api/my/alerts/read', { method: 'POST' }); return [r1.status, r2.status, r3.status];
   });
   ok('Contractor blocked from admin API (403)', sec[0] === 403); ok("Contractor can't read another's upload (404)", sec[1] === 404); ok('CSRF token required (403)', sec[2] === 403);

@@ -26,7 +26,19 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
 
   // ---- Board: titles + avatars + title filter
   ok('Board shows titles', (await a.textContent('#rows')).includes('Crew Chief'));
-  ok('Board shows headshot thumbnails', (await a.$$('#rows img.av')).length === 12);
+  ok('Board shows headshot thumbnails', (await a.$$('#rows img.av')).length === 13);
+  const photos = await a.evaluate(async () => { const l = (await api('GET', '/api/admin/contractors')).contractors; const out = [];
+    for (const c of l) { const r = await fetch(`/api/headshot/${c.id}?approved=1`); out.push([c.name, r.headers.get('content-type'), c.headshot_status]); } return out; });
+  ok('Every demo person has an approved JPEG headshot', photos.every((x) => x[1] === 'image/jpeg' && x[2] === 'approved'), photos.filter((x) => x[1] !== 'image/jpeg').map((x) => x[0]).join(', '));
+  await a.click('#rows tr:has-text("David Tran")'); await a.waitForSelector('.pcard'); await a.waitForTimeout(1200);
+  const pc = await a.textContent('.pcard');
+  ok('Board click opens profile with photo at top (David)', (await a.$eval('.pphoto', (i) => i.naturalWidth)) >= 256 && pc.includes('Lead') && pc.includes('RT-1013') && pc.includes('SEA'));
+  const dv = await a.evaluate(async () => { const l = (await api('GET', '/api/admin/contractors')).contractors; const id = l.find((c) => c.name === 'David Tran').id; return api('GET', `/api/admin/contractors/${id}`); });
+  const P = dv.profile; const full = dv.readiness.status === 'green' && P.passport.number && P.visas.length && P.gov_id.number && P.immunizations.length && P.physical.last_exam && P.description.height_ft && P.emergency_contacts.length === 2 && P.personal.phone && P.personal.address.line1 && dv.flights.length >= 5 && dv.schedule.length >= 3 && dv.readiness.items.some((i) => i.is_check && i.status === 'green');
+  ok('David is green and fully complete (docs, background check, description, contacts, flights, schedule)', !!full);
+  await a.evaluate(() => window.scrollTo(0, 0)); await a.waitForTimeout(300); await snap(a, '29-admin-profile-david.png');
+  await a.goto(BASE + '/admin.html#/'); await a.waitForSelector('#rows tr'); await a.waitForTimeout(600);
+  await a.evaluate(() => window.scrollTo(0, 0)); await a.waitForTimeout(300); await snap(a, '28-admin-board-photos.png');
   await a.selectOption('#titleF', { label: 'A&P Mechanic' }); await a.waitForTimeout(300);
   ok('Title filter narrows board to A&P Mechanics (2)', (await a.$$('#rows tr[data-id]')).length === 2);
   await a.selectOption('#titleF', ''); await snap(a, '30-admin-board-titles.png');
@@ -57,7 +69,7 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
 
   // ---- Schedule
   await a.goto(BASE + '/admin.html#/schedule'); await a.waitForSelector('.gantt'); await a.waitForTimeout(800);
-  ok('Schedule: one row per contractor', (await a.$$('.g-row[data-c]')).length === 12);
+  ok('Schedule: one row per contractor', (await a.$$('.g-row[data-c]')).length === 13);
   ok('Schedule: titles on rows', (await a.textContent('.g-names')).includes('Site Manager'));
   ok('Schedule: training + leave blocks', (await a.$$('.g-blk.k-training')).length >= 3 && (await a.$$('.g-blk.k-leave')).length >= 1);
   ok('Schedule: coverage gap at Arifjan', (await a.textContent('#main')).match(/GAP\s*Camp Arifjan/) !== null);

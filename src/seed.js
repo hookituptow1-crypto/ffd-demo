@@ -1,7 +1,7 @@
 'use strict';
 // Demo data — ALL names, numbers and people are fictional. Dates are relative to "today" so scenarios stay valid.
 const db = require('./db');
-const { hashPassword, encJSON } = require('./crypto');
+const { hashPassword, verifyPassword, encJSON, encrypt, token } = require('./crypto');
 const { today, fmt, addDays } = require('./status');
 
 const crypto = require('crypto');
@@ -16,10 +16,23 @@ function demoPasswords() {
   return JSON.parse(fs.readFileSync(f, 'utf8'));
 }
 const ADMIN_EMAIL = 'admin@ffd.demo';
+// On every boot (demo mode): make the seeded demo accounts match the current ADMIN_PASSWORD / CONTRACTOR_PASSWORD, so a
+// password change on the host takes effect with a plain restart (no reseed). Only touches the seeded @ffd.demo accounts.
+function syncPasswords() {
+  const pw = demoPasswords(); let n = 0;
+  for (const u of db.prepare("SELECT id, role, password_hash FROM users WHERE email LIKE '%@ffd.demo'").all()) {
+    const want = u.role === 'admin' ? pw.admin : pw.contractor;
+    if (!verifyPassword(want, u.password_hash)) { db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(want), u.id); n++; }
+  }
+  return n;
+}
 
 function seed() {
   const T = today();
   const d = (n) => fmt(addDays(T, n));
+  // remove encrypted files of the uploads we're about to drop (keeps the disk from filling up across nightly resets)
+  const UP = path.join(__dirname, '..', 'data', 'uploads');
+  for (const u of db.prepare('SELECT file FROM uploads').all()) { try { fs.unlinkSync(path.join(UP, u.file)); } catch {} }
   db.exec(`DELETE FROM sessions; DELETE FROM push_subs; DELETE FROM schedule_blocks; DELETE FROM checkins; DELETE FROM admin_alerts; DELETE FROM alerts; DELETE FROM uploads; DELETE FROM flights;
     DELETE FROM blockers; DELETE FROM documents; DELETE FROM profiles; DELETE FROM users; DELETE FROM contractors;
     DELETE FROM destination_requirements; DELETE FROM destinations; DELETE FROM requirement_types;`); // audit_log is kept across resets
@@ -87,7 +100,19 @@ function seed() {
     ['Ray Castillo', 'RT-1010', 'Green — deployed now (Erbil), checking in', 'Erbil, Iraq', -25, {}, null, null, 'ELP', 'ABQ'],
     ['Luis Fontaine', 'RT-1011', 'Green — deployed (Djibouti), flying home today', 'Camp Lemonnier, Djibouti', -60, {}, null, null, 'JAX', 'SAV'],
     ['Mike Brennan', 'RT-1012', 'Green — deployed now (Niger), check-in OVERDUE', 'Niamey, Niger', -10, {}, null, null, 'TUS', 'PHX'],
+    ['David Tran', 'RT-1013', 'Showcase — green, fully complete profile, deployed Djibouti', 'Camp Lemonnier, Djibouti', -20, {}, null, null, 'SEA', 'PDX'],
   ];
+  const LOOK = { // gender, age, hair, eyes, height ft/in, weight — matches the generated headshot in seed-assets/headshots/<emp>.jpg
+    'Marcus Delgado': ['Male', 29, 'Black', 'Brown', '5', '10', '182'], 'Dana Whitfield': ['Female', 31, 'Blond', 'Blue', '5', '6', '138'],
+    'Tyler Brandt': ['Male', 33, 'Brown', 'Hazel', '6', '1', '190'], 'Cody Ramirez': ['Male', 35, 'Black', 'Brown', '5', '9', '178'],
+    'Brianna Holt': ['Female', 37, 'Black', 'Brown', '5', '5', '142'], 'Wes Calloway': ['Male', 39, 'Brown', 'Blue', '6', '0', '201'],
+    'John Doe': ['Male', 41, 'Black', 'Brown', '5', '11', '188'], 'Sam Kowalski': ['Male', 43, 'Bald', 'Gray', '6', '2', '226'],
+    'Trent Vaughn': ['Male', 45, 'Gray', 'Brown', '5', '11', '195'], 'Ray Castillo': ['Male', 47, 'Black', 'Brown', '5', '8', '184'],
+    'Luis Fontaine': ['Male', 49, 'Gray', 'Brown', '5', '10', '190'], 'Mike Brennan': ['Male', 51, 'Brown', 'Hazel', '6', '0', '205'],
+    'David Tran': ['Male', 38, 'Black', 'Brown', '5', '9', '168'] };
+  const HOMEC = (a) => ({ IAH: ['Katy', 'TX', '77494'], DFW: ['Arlington', 'TX', '76010'], ATL: ['Peachtree City', 'GA', '30269'], MEM: ['Germantown', 'TN', '38138'],
+    DEN: ['Aurora', 'CO', '80012'], SAT: ['New Braunfels', 'TX', '78130'], MSY: ['Mandeville', 'LA', '70448'], OKC: ['Norman', 'OK', '73069'], ELP: ['El Paso', 'TX', '79936'],
+    JAX: ['Orange Park', 'FL', '32073'], TUS: ['Tucson', 'AZ', '85710'], SEA: ['Renton', 'WA', '98055'] })[a] || ['Katy', 'TX', '77494'];
   const reqsFor = db.prepare('SELECT rt.* FROM requirement_types rt JOIN destination_requirements dr ON dr.requirement_type_id = rt.id WHERE dr.destination_id = ?');
   const ids = {};
   people.forEach(([name, emp, scenario, dn, off, exc, ovr, ovrReason, home, alt], i) => {
@@ -98,6 +123,7 @@ function seed() {
     ids[name] = cid;
     user.run(email, pwHash, 'contractor', cid);
     const destReqs = reqsFor.all(D[dn]);
+    const look = LOOK[name] || ['Male', 29 + i * 2, 'Brown', 'Brown', '5', '10', '185'];
     const pp = {};
     for (const r of destReqs) {
       const e = r.name in exc ? exc[r.name] : GOOD[r.name];
@@ -118,11 +144,10 @@ function seed() {
     const [fn, ...ln] = name.split(' ');
     const destCountry = dn.split(', ')[1];
     prof.run(cid, encJSON({
-      personal: { legal_first: fn, legal_middle: '', legal_last: ln.join(' '), preferred_name: '', dob: fmt(addDays(T, -365 * (29 + i * 2) - i * 41)),
+      personal: { legal_first: fn, legal_middle: '', legal_last: ln.join(' '), preferred_name: '', dob: fmt(addDays(T, -365 * look[1] - i * 41)),
         place_of_birth: ['Houston, TX', 'Fort Worth, TX', 'Macon, GA', 'El Paso, TX', 'Pueblo, CO', 'San Antonio, TX', 'Beaumont, TX', 'Slidell, LA', 'Tulsa, OK'][i % 9],
-        citizenship: 'United States', second_citizenship: '', gender: name === 'Dana Whitfield' || name === 'Brianna Holt' ? 'Female' : 'Male',
-        phone, alt_phone: i % 2 ? '' : `(555) 01${String(i).padStart(2, '0')}-9${100 + i * 3}`, email: `${first}.${ln.join('').toLowerCase()}@example.com`, address: { line1: `${100 + i * 111} Demo Ranch Rd`, line2: '', city: ['Katy', 'Arlington', 'Warner Robins', 'Germantown', 'Colorado Springs', 'New Braunfels', 'Collierville', 'Mandeville', 'Norman'][i % 9],
-          state: ['TX', 'TX', 'GA', 'TN', 'CO', 'TX', 'TN', 'LA', 'OK'][i % 9], postal: ['77494', '76010', '31088', '38138', '80903', '78130', '38017', '70448', '73069'][i % 9], country: 'USA' } },
+        citizenship: 'United States', second_citizenship: '', gender: look[0],
+        phone, alt_phone: i % 2 ? '' : `(555) 01${String(i).padStart(2, '0')}-9${100 + i * 3}`, email: `${first}.${ln.join('').toLowerCase()}@example.com`, address: { line1: `${100 + i * 111} Demo Ranch Rd`, line2: '', city: HOMEC(home)[0], state: HOMEC(home)[1], postal: HOMEC(home)[2], country: 'USA' } },
       travel: { home_airport: home, alt_airport: alt || '' },
       emergency_contacts: [
         { name: `${['Pat', 'Chris', 'Jordan', 'Maria', 'Sam', 'Lee', 'Jane', 'Alex', 'Kim'][i % 9]} ${ln.join(' ')}`, relationship: ['Spouse', 'Husband', 'Wife', 'Wife', 'Mother', 'Spouse', 'Wife', 'Brother', 'Wife'][i % 9],
@@ -134,8 +159,7 @@ function seed() {
       visas: Object.entries(pp).filter(([k]) => /Visa/.test(k)).map(([k, v]) => ({ country: destCountry, type: k, number: `V-DEMO-${v.last4}`, issued: v.issued, expires: v.expires, entries: i % 2 ? 'Single' : 'Multiple', upload: null })),
       physical: pp['Medical Fitness Clearance'] ? { last_exam: pp['Medical Fitness Clearance'].issued, expires: pp['Medical Fitness Clearance'].expires, provider: 'Company Clinic (demo)', upload: null }
         : { last_exam: d(-120 - i * 9), expires: d(245 - i * 9), provider: 'Company Clinic (demo)', upload: null },
-      description: { height_ft: ['5', '5', '6', '5', '5', '6', '5', '6', '6'][i % 9], height_in: ['11', '6', '1', '9', '4', '2', '10', '0', '3'][i % 9], weight_lbs: ['205', '140', '190', '178', '128', '215', '185', '230', '198'][i % 9],
-        eye_color: ['Brown', 'Blue', 'Hazel', 'Brown', 'Green', 'Blue', 'Brown', 'Gray', 'Brown'][i % 9], hair_color: ['Black', 'Blond', 'Brown', 'Black', 'Red', 'Brown', 'Brown', 'Bald', 'Gray'][i % 9] },
+      description: { height_ft: look[4], height_in: look[5], weight_lbs: look[6], eye_color: look[3], hair_color: look[2] },
       medications: [[{ name: 'Lisinopril', dose: '10 mg', frequency: 'Once daily' }], [], [{ name: 'Cetirizine', dose: '10 mg', frequency: 'As needed' }], [], [{ name: 'Levothyroxine', dose: '50 mcg', frequency: 'Once daily' }],
         [{ name: 'Atorvastatin', dose: '20 mg', frequency: 'Once daily' }, { name: 'Ibuprofen', dose: '400 mg', frequency: 'As needed' }], [], [{ name: 'Omeprazole', dose: '20 mg', frequency: 'Once daily' }], [{ name: 'Metformin', dose: '500 mg', frequency: 'Twice daily' }]][i % 9],
       gov_id: pp["Government ID / Driver's License"] ? { type: "Driver's License", number: `DL-DEMO-${pp["Government ID / Driver's License"].last4}`, state: 'TX', expires: pp["Government ID / Driver's License"].expires } : {},
@@ -144,7 +168,7 @@ function seed() {
       medical: { blood_type: ['O+', 'A+', 'B+', 'O-', 'A-', 'AB+', 'O+', 'B-', 'A+'][i % 9], allergies: ['Penicillin', 'None known', 'Seasonal pollen', 'Penicillin', 'Shellfish', 'None known', 'Penicillin, bee stings', 'Sulfa drugs', 'None known'][i % 9],
         conditions: ['Controlled hypertension', 'None', 'Mild seasonal allergies', 'None', 'Hypothyroidism (controlled)', 'High cholesterol', 'None', 'GERD', 'Type 2 diabetes (controlled)'][i % 9], medications: '', notes: '' },
       clearances: pp['Medical Fitness Clearance'] ? [{ type: 'Medical Fitness', level: 'Fit for deployment', granted: pp['Medical Fitness Clearance'].issued, expires: pp['Medical Fitness Clearance'].expires }] : [],
-      employment: { employer: 'FFD Demo Services LLC', position: ['Crew Chief', 'Inspector / QA', 'Avionics Technician', 'A&P Mechanic', 'Aircraft Maintenance Technician', 'A&P Mechanic', 'Aircraft Maintenance Technician', 'Avionics Technician', 'Supervisor', 'Lead', 'Aircraft Maintenance Technician', 'Site Manager'][i],
+      employment: { employer: 'FFD Demo Services LLC', position: ['Crew Chief', 'Inspector / QA', 'Avionics Technician', 'A&P Mechanic', 'Aircraft Maintenance Technician', 'A&P Mechanic', 'Aircraft Maintenance Technician', 'Avionics Technician', 'Supervisor', 'Lead', 'Aircraft Maintenance Technician', 'Site Manager', 'Lead'][i] || 'Aircraft Maintenance Technician',
         employee_no: emp, supervisor: 'Ops Manager (Demo)', start_date: d(-700 - i * 90) },
     }), 'seed');
   });
@@ -177,7 +201,7 @@ function seed() {
   if (!db.prepare('SELECT COUNT(*) n FROM titles').get().n) TITLES.forEach((t, k) => db.prepare('INSERT INTO titles (name, sort) VALUES (?,?)').run(t, k));
   const pick = { 'Marcus Delgado': 'Crew Chief', 'Dana Whitfield': 'Inspector / QA', 'Tyler Brandt': 'Avionics Technician', 'Cody Ramirez': 'A&P Mechanic', 'Brianna Holt': 'Aircraft Maintenance Technician',
     'Wes Calloway': 'A&P Mechanic', 'John Doe': 'Aircraft Maintenance Technician', 'Sam Kowalski': 'Avionics Technician', 'Trent Vaughn': 'Supervisor', 'Ray Castillo': 'Lead',
-    'Luis Fontaine': 'Aircraft Maintenance Technician', 'Mike Brennan': 'Site Manager' };
+    'Luis Fontaine': 'Aircraft Maintenance Technician', 'Mike Brennan': 'Site Manager', 'David Tran': 'Lead' };
   for (const [n, t] of Object.entries(pick)) db.prepare('UPDATE contractors SET title_id = (SELECT id FROM titles WHERE name = ?) WHERE id = ?').run(t, ids[n]);
 
   const flIns = db.prepare(`INSERT INTO flights (contractor_id, airline, flight_no, from_airport, to_airport, depart_at, arrive_at, confirmation, seat, notes, sent_at, seen_at, direction)
@@ -214,10 +238,45 @@ function seed() {
     db.prepare("UPDATE contractors SET tracking_consent = 1, tracking_consent_at = datetime('now', '-9 days') WHERE id = ?").run(ids[n]);
     times.forEach((t, j) => ci.run(ids[n], j === times.length - 1 ? 'checkin' : 'auto', enc({ lat: lat + (j - 1) * 0.004 + k * 0.001, lng: lng + (j - 1) * 0.003, acc: 25 + j * 10 }), t));
   });
+  // AI-generated portraits of fictional people (seed-assets/headshots/<employee #>.jpg) -> encrypted uploads, pre-approved
+  const HS = path.join(__dirname, '..', 'seed-assets', 'headshots'); fs.mkdirSync(UP, { recursive: true });
+  for (const [n, cid] of Object.entries(ids)) {
+    const emp = people.find((x) => x[0] === n)[1]; const f = path.join(HS, `${emp}.jpg`); if (!fs.existsSync(f)) continue;
+    const buf = fs.readFileSync(f); const file = `${token()}.bin`; fs.writeFileSync(path.join(UP, file), encrypt(buf), { mode: 0o600 });
+    const uid = Number(db.prepare("INSERT INTO uploads (contractor_id, label, mime, size, file, uploaded_by) VALUES (?, 'Headshot', 'image/jpeg', ?, ?, 'seed')").run(cid, buf.length, file).lastInsertRowid);
+    db.prepare("UPDATE contractors SET headshot_upload_id = ?, headshot_status = 'approved', headshot_at = datetime('now', '-30 days') WHERE id = ?").run(uid, cid);
+  }
+  // Every profile has linked flights: past legs of the current/last rotation plus anything already booked ahead
+  dir = 'outbound';
+  fl.run(ids['Tyler Brandt'], 'Delta', 'DL 8', 'ATL', 'CDG', `${d(35)}T17:40`, `${d(36)}T07:30`, 'AFDEMO3', '31C', 'Booked early — Djibouti rotation.', '-1 days', d(0));
+  fl.run(ids['Tyler Brandt'], 'Air France', 'AF 3640', 'CDG', 'JIB', `${d(36)}T10:15`, `${d(36)}T18:40`, 'AFDEMO3', '22A', '', '-1 days', d(0));
+  fl.run(ids['Ray Castillo'], 'American', 'AA 2290', 'ELP', 'DFW', `${d(-25)}T06:05`, `${d(-25)}T09:00`, 'QRDEMO9', '12D', '', '-27 days', d(-26));
+  fl.run(ids['Ray Castillo'], 'Qatar Airways', 'QR 730', 'DFW', 'DOH', `${d(-25)}T16:25`, `${d(-24)}T15:50`, 'QRDEMO9', '40A', '', '-27 days', d(-26));
+  fl.run(ids['Ray Castillo'], 'Qatar Airways', 'QR 450', 'DOH', 'EBL', `${d(-24)}T20:10`, `${d(-24)}T22:40`, 'QRDEMO9', '19C', '', '-27 days', d(-26));
+  fl.run(ids['Mike Brennan'], 'American', 'AA 1530', 'TUS', 'DFW', `${d(-10)}T07:15`, `${d(-10)}T11:50`, 'AFDEMO6', '9F', '', '-12 days', d(-11));
+  fl.run(ids['Mike Brennan'], 'Air France', 'AF 23', 'DFW', 'CDG', `${d(-10)}T15:30`, `${d(-9)}T07:10`, 'AFDEMO6', '33K', '', '-12 days', d(-11));
+  fl.run(ids['Mike Brennan'], 'Air France', 'AF 516', 'CDG', 'NIM', `${d(-9)}T10:35`, `${d(-9)}T15:05`, 'AFDEMO6', '18A', 'Site security escort at arrivals.', '-12 days', d(-11));
+  fl.run(ids['David Tran'], 'Alaska', 'AS 340', 'SEA', 'SFO', `${d(-20)}T06:00`, `${d(-20)}T08:15`, 'EKDEMO5', '8A', '', '-22 days', d(-21));
+  fl.run(ids['David Tran'], 'Emirates', 'EK 226', 'SFO', 'DXB', `${d(-20)}T15:50`, `${d(-19)}T19:45`, 'EKDEMO5', '44K', '', '-22 days', d(-21));
+  fl.run(ids['David Tran'], 'Flydubai', 'FZ 621', 'DXB', 'JIB', `${d(-18)}T07:55`, `${d(-18)}T10:20`, 'EKDEMO5', '6C', 'Lemonnier transport desk meets you.', '-22 days', d(-21));
+  dir = 'return';
+  fl.run(ids['David Tran'], 'Flydubai', 'FZ 622', 'JIB', 'DXB', `${d(40)}T03:15`, `${d(40)}T08:00`, 'EKDEMO8', '7A', 'Return booked — end of rotation.', '-2 days', d(-1));
+  fl.run(ids['David Tran'], 'Emirates', 'EK 229', 'DXB', 'SEA', `${d(40)}T09:05`, `${d(40)}T13:10`, 'EKDEMO8', '38C', '', '-2 days', d(-1));
+  fl.run(ids['John Doe'], 'Flydubai', 'FZ 622', 'JIB', 'DXB', `${d(-13)}T03:15`, `${d(-13)}T08:00`, 'FZDEMO4', '14C', 'Last rotation home leg.', '-20 days', d(-19));
+  fl.run(ids['John Doe'], 'Emirates', 'EK 211', 'DXB', 'IAH', `${d(-13)}T09:20`, `${d(-13)}T16:15`, 'FZDEMO4', '46A', '', '-20 days', d(-19));
+  fl.run(ids['John Doe'], 'United', 'UA 4120', 'IAH', 'MEM', `${d(-13)}T19:00`, `${d(-13)}T20:40`, 'FZDEMO4', '', '', '-20 days', d(-19));
+  fl.run(ids['Trent Vaughn'], 'Kuwait Airways', 'KU 117', 'KWI', 'JFK', `${d(-1)}T09:45`, `${d(-1)}T15:30`, 'KUDEMO1', '28H', 'Held over 4 days — home for HR review.', '-3 days', d(-2));
+  fl.run(ids['Trent Vaughn'], 'American', 'AA 1123', 'JFK', 'OKC', `${d(-1)}T18:20`, `${d(-1)}T21:35`, 'KUDEMO1', '', '', '-3 days', d(-2));
+  fl.run(ids['Wes Calloway'], 'Qatar Airways', 'QR 451', 'EBL', 'DOH', `${d(-24)}T23:55`, `${d(-23)}T01:45`, 'QRDEMO6', '20K', '', '-30 days', d(-29));
+  fl.run(ids['Wes Calloway'], 'Qatar Airways', 'QR 713', 'DOH', 'IAH', `${d(-23)}T08:20`, `${d(-23)}T15:05`, 'QRDEMO6', '38D', 'Next rotation flights not booked yet.', '-30 days', d(-29));
+  fl.run(ids['Wes Calloway'], 'United', 'UA 5540', 'IAH', 'SAT', `${d(-23)}T18:10`, `${d(-23)}T19:15`, 'QRDEMO6', '', '', '-30 days', d(-29));
+  dir = 'outbound';
+  db.prepare("UPDATE contractors SET tracking_consent = 1, tracking_consent_at = datetime('now', '-18 days') WHERE id = ?").run(ids['David Tran']);
+  ['-7 hours', '-2 hours'].forEach((t, j) => ci.run(ids['David Tran'], j ? 'checkin' : 'auto', enc({ lat: 11.5432 + j * 0.002, lng: 43.1490 + j * 0.002, acc: 20 }), t));
   db.meta.set('seed_version', SEED_VERSION);
   return { ids };
 }
 
-const SEED_VERSION = '12'; // bump when demo data shape changes; demo servers reseed on boot
-module.exports = { seed, SEED_VERSION };
+const SEED_VERSION = '13'; // bump when demo data shape changes; demo servers reseed on boot
+module.exports = { syncPasswords, seed, SEED_VERSION };
 if (require.main === module) { seed(); console.log('Seeded.'); }

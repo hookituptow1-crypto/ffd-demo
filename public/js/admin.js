@@ -76,6 +76,16 @@ async function detail(id, sub = 'readiness') {
       <div class="right row"><button class="btn" id="edit">Edit</button></div></div>
     <div class="row wrap mb small mut"><span>${esc(c.employee_no)}</span>·<span>📍 ${esc((A.dests.destinations.find((x) => x.id === c.destination_id) || {}).name || '—')}</span>·
       <span>Rotation ${fdate(r.rotation.start)} → ${fdate(r.rotation.end)}</span>·<span>Next ${fdate(r.rotation.next_start)}</span>·<span>🛫 Home ${esc(airportLabel(c.home_airport) || '—')}${c.alt_airport ? ` · alt ${esc(c.alt_airport)}` : ''}</span>·<span>${c.rotation_on}/${c.rotation_off}</span>·<span>Login: ${esc(d.account_email || 'none')}</span></div>
+    ${(() => { const p = d.profile || {}; const pe = p.personal || {}; const ec = (p.emergency_contacts || [])[0] || {}; const ad = pe.address || {}; const ds = p.description || {};
+      const next = d.flights.find((f) => f.depart_at.slice(0, 10) >= new Date().toISOString().slice(0, 10));
+      return `<div class="card mb pcard"><img class="pphoto" src="/api/headshot/${c.id}" alt="Headshot of ${esc(c.name)}">
+      <div class="pgrid"><div><div class="lbl">Title / role</div><b>${esc(c.title || '—')}</b></div><div><div class="lbl">Contractor ID</div><b>${esc(c.employee_no)}</b></div>
+        <div><div class="lbl">Readiness</div>${pill(r.status)}</div><div><div class="lbl">Site</div><b>${esc((A.dests.destinations.find((x) => x.id === c.destination_id) || {}).name || '—')}</b></div>
+        <div><div class="lbl">Current / upcoming rotation</div>${fdate(r.rotation.start)} → ${fdate(r.rotation.end)}</div><div><div class="lbl">Next rotation</div>${fdate(r.rotation.next_start)} → ${fdate(r.rotation.next_end)}</div>
+        <div><div class="lbl">Home airport</div>${esc(c.home_airport || '—')}${c.alt_airport ? ` · alt ${esc(c.alt_airport)}` : ''}</div><div><div class="lbl">Next flight</div>${next ? `${esc(next.airline)} ${esc(next.flight_no)} · ${fdt(next.depart_at)}` : '<span class="mut">none booked</span>'}</div>
+        <div><div class="lbl">Mobile / email</div>${esc(pe.phone || c.phone || '—')} · ${esc(pe.email || c.email || '—')}</div><div><div class="lbl">Home address</div>${esc([ad.line1, ad.city, ad.state, ad.postal].filter(Boolean).join(', ') || '—')}</div>
+        <div><div class="lbl">Emergency contact</div>${ec.name ? `${esc(ec.name)} (${esc(ec.relationship)}) · ${esc(ec.phone)}` : '<span class="pill red">missing</span>'}</div><div><div class="lbl">Description</div>${ds.height_ft ? `${esc(ds.height_ft)}′${esc(ds.height_in)}″ · ${esc(ds.weight_lbs)} lb · ${esc(ds.eye_color)} eyes · ${esc(ds.hair_color)} hair` : '—'}</div>
+      </div><a class="btn sm" href="#/c/${c.id}/badge">🪪 ID badge</a></div>`; })()}
     <div class="tabs">${[['readiness', 'Readiness'], ['profile', 'Profile / intake'], ['flights', `Flights (${d.flights.length})`], ['alerts', 'Alerts'], ['schedule', 'Schedule'], ['badge', 'ID badge'], ['account', 'App login']].map(([k, t]) => `<button data-sub="${k}" class="${k === sub ? 'on' : ''}">${t}</button>`).join('')}</div>
     <div id="sub"></div>`;
   $('#edit').addEventListener('click', () => contractorModal(c));

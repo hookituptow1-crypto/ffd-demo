@@ -8,7 +8,7 @@ const C = require('./crypto');
 const V = require('./validate');
 const { evaluate } = require('./status');
 const assistant = require('./assistant');
-const { seed, SEED_VERSION } = require('./seed');
+const { seed, SEED_VERSION, syncPasswords } = require('./seed');
 const SEC = require('./security');
 
 const PORT = Number(process.env.PORT || 4300);
@@ -20,6 +20,7 @@ if (!db.prepare('SELECT COUNT(*) n FROM users').get().n || (DEMO_MODE && db.meta
   for (const f of fs.readdirSync(UPLOAD_DIR)) fs.unlinkSync(path.join(UPLOAD_DIR, f));
   seed(); console.log(`Seeded demo data v${SEED_VERSION}`);
 }
+if (DEMO_MODE) { const n = syncPasswords(); if (n) console.log(`Demo account passwords updated from env (${n} accounts)`); }
 function resetDemo(reason) {
   for (const f of fs.readdirSync(UPLOAD_DIR)) fs.unlinkSync(path.join(UPLOAD_DIR, f));
   seed();
@@ -135,23 +136,23 @@ function sendAlert(cids, kind, title, body, by) {
 }
 
 // --------------- auth ---------------
-// Brute force: max 10 failed logins per client IP per 15 min, max 5 per account+IP per 15 min, and a soft cap of
+// Brute force (demo-friendly): max 20 failed logins per client IP per 5 min, max 10 per account+IP per 5 min, and a soft cap of
 // 50 failures per account per hour from all IPs. Responses are identical for unknown users, wrong passwords and
 // lockouts (no account enumeration), and a hash is always computed so timing doesn't leak either.
 const DUMMY_HASH = C.hashPassword(C.token());
-app.post('/api/login', SEC.limit('login', 30, 15 * 60000), wrap(async (req, res) => {
+app.post('/api/login', SEC.limit('login', 60, 15 * 60000), wrap(async (req, res) => {
   const ip = req.clientIp;
   const email = V.str(req.body.email, 120, { required: true, name: 'Email' }).toLowerCase();
   const password = V.str(req.body.password, 200, { required: true, name: 'Password' });
-  const W = 15 * 60000;
-  const blocked = SEC.peek(`lf-ip:${ip}`, W) >= 10 || SEC.peek(`lf-acct-ip:${email}:${ip}`, W) >= 5 || SEC.peek(`lf-acct:${email}`, 3600000) >= 50;
+  const W = 5 * 60000; // lockout counters live in memory only, so every deploy/restart clears them
+  const blocked = SEC.peek(`lf-ip:${ip}`, W) >= 20 || SEC.peek(`lf-acct-ip:${email}:${ip}`, W) >= 10 || SEC.peek(`lf-acct:${email}`, 3600000) >= 50;
   const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
   const good = C.verifyPassword(password, u ? u.password_hash : DUMMY_HASH) && !!u;
   if (blocked || !good) {
     if (!good) { SEC.hit(`lf-ip:${ip}`, 1e9, W); SEC.hit(`lf-acct-ip:${email}:${ip}`, 1e9, W); SEC.hit(`lf-acct:${email}`, 1e9, 3600000); }
     audit({ clientIp: ip, user: u ? { id: u.id } : null }, blocked ? 'login_blocked' : 'login_failed', email);
     await new Promise((r) => setTimeout(r, 300 + Math.random() * 300)); // slow down guessing
-    return res.status(401).json({ error: 'Email or password is incorrect, or too many attempts. Wait 15 minutes and try again.' });
+    return res.status(401).json({ error: 'Email or password is incorrect, or too many attempts. Wait 5 minutes and try again.' });
   }
   SEC.reset(`lf-acct-ip:${email}:${ip}`);
   // Session fixation: any session presented with this request is destroyed; a brand-new random token is issued.

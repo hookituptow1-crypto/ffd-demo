@@ -4,6 +4,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev --ignore-scripts
 COPY src ./src
 COPY public ./public
+COPY seed-assets ./seed-assets
 ENV NODE_ENV=production PORT=8080
 # Mount a persistent volume at /app/data (SQLite DB, encryption key, encrypted uploads, VAPID keys)
 VOLUME ["/app/data"]
