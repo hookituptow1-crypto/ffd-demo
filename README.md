@@ -118,3 +118,6 @@ src/seed.js       fictional demo data (dates relative to today)
 public/           login, contractor PWA, admin dashboard (vanilla JS, no build step)
 tools/e2e.js      Playwright click-through of every scenario (writes ./screens)
 ```
+
+## Phone (compact) admin view
+On screens narrower than 768px the admin opens in a **compact view**: status cards (photo, name, title, big status dot, problems first), tappable red / yellow / green / traveling-today chips, a bottom tab bar (Board · Schedule · Report · Map · More), a profile with collapsible Documents / Flights / Contacts / Medical / Schedule sections, and phone-friendly schedule and report lists. The **Compact / Full view** button at the top switches views and is remembered per device. Tablets and laptops open the full view as before. Test: `BASE=... node tools/e2e-mobile.js` (iPhone 390×844).
