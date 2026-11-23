@@ -81,8 +81,8 @@ function auth(req, res, next) {
   req.clientIp = SEC.clientIp(req);
   const tok = getTok(req);
   if (tok) {
-    const s = db.prepare('SELECT s.*, u.email, u.role, u.contractor_id FROM sessions s JOIN users u ON u.id = s.user_id WHERE token_hash = ?').get(C.sha256(tok));
-    if (s && s.expires_at > Date.now()) req.user = { id: s.user_id, email: s.email, role: s.role, contractor_id: s.contractor_id, csrf: s.csrf };
+    const s = db.prepare('SELECT s.*, u.email, u.role, u.contractor_id, u.must_change FROM sessions s JOIN users u ON u.id = s.user_id WHERE token_hash = ?').get(C.sha256(tok));
+    if (s && s.expires_at > Date.now()) req.user = { id: s.user_id, email: s.email, role: s.role, contractor_id: s.contractor_id, csrf: s.csrf, must_change: !!s.must_change };
   }
   next();
 }
@@ -93,9 +93,14 @@ app.use('/api', (req, res, next) => {
   // Defense in depth: reject cross-site writes by Origin, then require the per-session CSRF token
   const origin = req.get('origin');
   if (origin && origin !== `${req.protocol}://${req.get('host')}`) return res.status(403).json({ error: 'Cross-site request blocked' });
-  if (req.path === '/login') return next();
+  if (['/login', '/password/forgot', '/password/check', '/password/reset'].includes(req.path)) return next(); // no session yet; Origin check above still applies
   if (!req.user || !req.get('x-csrf-token') || req.get('x-csrf-token') !== req.user.csrf) return res.status(403).json({ error: 'Session expired — please sign in again' });
   next();
+});
+// A user with a temporary / force-reset password can only change it (or sign out) until they do.
+app.use('/api', (req, res, next) => {
+  if (!req.user || !req.user.must_change || ['/me', '/logout', '/password/change'].includes(req.path)) return next();
+  res.status(403).json({ error: 'You must choose a new password before continuing.', must_change: true });
 });
 const need = (role) => (req, res, next) => {
   if (!req.user) return res.status(401).json({ error: 'Sign in required' });
@@ -162,7 +167,7 @@ app.post('/api/login', SEC.limit('login', 60, 15 * 60000), wrap(async (req, res)
   db.prepare('INSERT INTO sessions (token_hash, user_id, csrf, expires_at) VALUES (?,?,?,?)').run(C.sha256(tok), u.id, csrf, now + SESSION_HOURS * 3600000);
   res.set('Set-Cookie', `${COOKIE(req)}=${tok}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${SESSION_HOURS * 3600}${req.secure ? '; Secure' : ''}`);
   audit({ clientIp: ip, user: { id: u.id } }, 'login', email);
-  res.json({ role: u.role, csrf });
+  res.json({ role: u.role, csrf, must_change: !!u.must_change });
 }));
 app.post('/api/logout', need(), (req, res) => {
   db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(C.sha256(getTok(req) || ''));
@@ -170,9 +175,86 @@ app.post('/api/logout', need(), (req, res) => {
   audit(req, 'logout', req.user.email);
   res.json({ ok: true });
 });
+// --------------- passwords: forgot / reset / change (+ admin overrides further down) ---------------
+const MAIL = require('./mail');
+const APP_URL = (process.env.APP_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 4300}`).replace(/\/$/, ''); // never built from the Host header
+const RESET_MIN = 30;
+const COMMON_PW = new Set(['password', 'password1', 'password123', 'qwerty123', 'letmein', 'welcome1', 'changeme', 'iloveyou', 'admin123', '123456789012', 'deployment']);
+function pwProblem(pw, email) {
+  if (typeof pw !== 'string' || pw.length < 12) return 'Use at least 12 characters.';
+  if (pw.length > 200) return 'Use at most 200 characters.';
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((r) => r.test(pw)).length;
+  if (classes < 3) return 'Mix at least 3 of: lowercase, uppercase, numbers, symbols.';
+  const low = pw.toLowerCase(); const local = String(email || '').split('@')[0].toLowerCase();
+  if (COMMON_PW.has(low) || /^(.)\1+$/.test(pw) || (local.length >= 3 && low.includes(local)) || /ffd|fitfordeploy/.test(low)) return 'Too easy to guess — avoid common words, your name/email and "FFD".';
+  return null;
+}
+const strong = (pw, email) => { const p = pwProblem(pw, email); if (p) throw new V.VErr(p); return pw; };
+const clearLockouts = (email) => SEC.resetMatching(new RegExp(`^lf-acct(-ip)?:${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(:|$)`));
+function issueReset(u, by) {
+  db.prepare('DELETE FROM password_resets WHERE user_id = ?').run(u.id); // a new request invalidates any earlier link
+  const tok = C.token(32);
+  db.prepare('INSERT INTO password_resets (user_id, token_hash, expires_at, created_by) VALUES (?,?,?,?)').run(u.id, C.sha256(tok), Date.now() + RESET_MIN * 60000, by);
+  return `${APP_URL}/reset.html#t=${tok}`;
+}
+const resetMail = (u, link, byAdmin) => MAIL.send(u.email, 'Reset your FFD password',
+  `${byAdmin ? 'An FFD administrator started a password reset for your account.' : 'Someone (hopefully you) asked to reset the password for your FFD account.'}\n\n`
+  + `Choose a new password here (link works once, for ${RESET_MIN} minutes):\n${link}\n\nIf you didn't ask for this, ignore this email — your password stays the same.\n\n— FFD · Fit For Deployment`, 'reset');
+const changedMail = (u, how) => MAIL.send(u.email, 'Your FFD password was changed',
+  `The password for your FFD account (${u.email}) was changed ${how} on ${new Date().toUTCString()}.\nAll devices were signed out.\n\n`
+  + 'If this wasn\'t you, contact your FFD administrator right away.\n\n— FFD · Fit For Deployment', 'changed');
+function afterPasswordChange(u, req, how, keepSession) {
+  db.prepare('DELETE FROM password_resets WHERE user_id = ?').run(u.id);
+  if (keepSession) db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(u.id, C.sha256(getTok(req) || ''));
+  else db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id);
+  clearLockouts(u.email.toLowerCase());
+  changedMail(u, how);
+  if (u.contractor_id) sendAlert([u.contractor_id], 'info', 'Your password was changed', `Your FFD password was changed ${how}. If this wasn't you, contact your FFD administrator.`, 'system');
+}
+const SAME = { ok: true, message: `If that email has an FFD account, a reset link is on its way. It works once and expires in ${RESET_MIN} minutes.` };
+app.post('/api/password/forgot', SEC.limit('pwf-ip', 5, 15 * 60000), wrap(async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase().slice(0, 120);
+  const t0 = Date.now();
+  if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) && SEC.hit(`pwf-em:${email}`, 3, 3600000).ok) { // per-email cap is silent: same answer either way
+    const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    if (u) { resetMail(u, issueReset(u, 'self'), false); audit({ clientIp: req.clientIp, user: { id: u.id } }, 'password_reset_requested', email); }
+  }
+  await new Promise((r) => setTimeout(r, Math.max(0, 450 - (Date.now() - t0)) + Math.random() * 150)); // equal timing for known/unknown emails
+  res.set('Cache-Control', 'no-store').json(SAME);
+}));
+const findReset = (tok) => {
+  if (typeof tok !== 'string' || !/^[A-Za-z0-9_-]{20,100}$/.test(tok)) return null;
+  const r = db.prepare('SELECT pr.*, u.email FROM password_resets pr JOIN users u ON u.id = pr.user_id WHERE token_hash = ?').get(C.sha256(tok));
+  return r && !r.used_at && r.expires_at > Date.now() ? r : null;
+};
+app.post('/api/password/check', SEC.limit('pwr-ip', 20, 15 * 60000), (req, res) => { // reset page asks "is this link still good?"
+  const r = findReset(req.body.token); res.set('Cache-Control', 'no-store').json({ valid: !!r, email: r ? r.email.replace(/^(.).*?(@.*)$/, '$1•••$2') : null });
+});
+app.post('/api/password/reset', SEC.limit('pwr-ip', 10, 15 * 60000), (req, res) => {
+  const r = findReset(req.body.token);
+  if (!r) return res.status(400).json({ error: 'This reset link is invalid, already used or expired. Request a new one.' });
+  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(r.user_id);
+  strong(req.body.password, u.email);
+  if (C.verifyPassword(req.body.password, u.password_hash)) throw new V.VErr('Choose a password you have not used for this account.');
+  db.prepare("UPDATE users SET password_hash = ?, must_change = 0, pw_changed_at = datetime('now'), failed_logins = 0, locked_until = NULL WHERE id = ?").run(C.hashPassword(req.body.password), u.id);
+  db.prepare("UPDATE password_resets SET used_at = datetime('now') WHERE id = ?").run(r.id);
+  afterPasswordChange(u, req, 'with an emailed reset link', false);
+  audit({ clientIp: req.clientIp, user: { id: u.id } }, 'password_reset_completed', u.email);
+  res.set('Set-Cookie', clearCookie(req)).json({ ok: true });
+});
+app.post('/api/password/change', need(), SEC.limit('pwc', 10, 15 * 60000), (req, res) => {
+  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (!C.verifyPassword(String(req.body.current || ''), u.password_hash)) { audit(req, 'password_change_failed', u.email); return res.status(400).json({ error: 'Current password is not correct.' }); }
+  strong(req.body.password, u.email);
+  if (req.body.password === req.body.current) throw new V.VErr('The new password must be different from the current one.');
+  db.prepare("UPDATE users SET password_hash = ?, must_change = 0, pw_changed_at = datetime('now') WHERE id = ?").run(C.hashPassword(req.body.password), u.id);
+  afterPasswordChange(u, req, u.must_change ? 'after a required password change' : 'from the signed-in account', true);
+  audit(req, u.must_change ? 'password_changed_required' : 'password_changed', u.email);
+  res.json({ ok: true, role: u.role });
+});
 app.get('/api/me', (req, res) => {
   if (!req.user) return res.status(401).json({ error: 'Sign in required' });
-  res.json({ email: req.user.email, role: req.user.role, csrf: req.user.csrf, vapid: VAPID.publicKey });
+  res.json({ email: req.user.email, role: req.user.role, csrf: req.user.csrf, vapid: VAPID.publicKey, must_change: req.user.must_change });
 });
 // Demo scenario list (admin only; never includes passwords)
 app.get('/api/demo-info', need('admin'), (req, res) => {
@@ -443,6 +525,7 @@ app.post('/api/my/sos', need('contractor'), SEC.limit('sos', 3, 10 * 60000, (r) 
 // --------------- admin ---------------
 const admin = express.Router();
 admin.use(need('admin'));
+const onNow = (cid, day = fmtToday()) => db.prepare("SELECT * FROM schedule_blocks WHERE contractor_id = ? AND kind = 'on' AND start <= ? AND end >= ?").get(cid, day, day);
 admin.get('/contractors', (req, res) => {
   const list = db.prepare('SELECT * FROM contractors ORDER BY name').all().map((c) => {
     const r = readiness(c); const p = getProfile(c.id);
@@ -450,7 +533,7 @@ admin.get('/contractors', (req, res) => {
       deploy_date: r.rotation.start, next_deploy: r.rotation.next_start, days_to_deploy: r.rotation.days_to_deploy, status: r.status, overridden: r.overridden,
       issues: r.items.filter((i) => i.status !== 'green').map((i) => ({ name: i.name, status: i.status })).concat(r.blockers.map((b) => ({ name: b.description, status: 'red' }))),
       fix_by: r.fix_by, passport_masked: mask(p.passport && p.passport.number), dob_masked: p.personal.dob ? `••••-••-${p.personal.dob.slice(-2)}` : '',
-      unverified: r.items.filter((i) => i.document && !i.document.verified).length, scenario: c.notes, home_airport: c.home_airport, alt_airport: c.alt_airport, title_id: c.title_id, title: titleName(c.title_id), headshot_status: c.headshot_upload_id ? c.headshot_status : null };
+      unverified: r.items.filter((i) => i.document && !i.document.verified).length, scenario: c.notes, home_airport: c.home_airport, alt_airport: c.alt_airport, title_id: c.title_id, title: titleName(c.title_id), swing: !!c.swing, on_now: !!onNow(c.id), headshot_status: c.headshot_upload_id ? c.headshot_status : null };
   });
   res.json({ contractors: list });
 });
@@ -511,6 +594,46 @@ admin.put('/contractors/:id/account', (req, res) => {
   if (u) { db.prepare('UPDATE users SET email = ?, password_hash = ? WHERE id = ?').run(email, C.hashPassword(pw), u.id); db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id); }
   else db.prepare("INSERT INTO users (email, password_hash, role, contractor_id) VALUES (?,?,'contractor',?)").run(email, C.hashPassword(pw), c.id);
   audit(req, 'account_set', c.name); res.json({ ok: true });
+});
+const acctFor = (cid) => { const u = db.prepare('SELECT * FROM users WHERE contractor_id = ?').get(cid); if (!u) throw new V.VErr('This contractor has no app login yet — set one first.'); return u; };
+const lockState = (email) => { const e = email.toLowerCase(); let worst = 0;
+  for (const k of [`lf-acct:${e}`]) worst = Math.max(worst, SEC.peek(k, 3600000));
+  return { failures_last_hour: worst, locked: worst >= 50 || SEC.peekMatching(new RegExp(`^lf-acct-ip:${e.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:`), 5 * 60000) >= 10 }; };
+admin.get('/contractors/:id/account', (req, res) => {
+  const c = getContractor(idParam(req.params.id)); const u = db.prepare('SELECT * FROM users WHERE contractor_id = ?').get(c.id);
+  if (!u) return res.json({ account: null });
+  const sess = db.prepare('SELECT COUNT(*) n FROM sessions WHERE user_id = ? AND expires_at > ?').get(u.id, Date.now()).n;
+  const last = db.prepare("SELECT at FROM audit_log WHERE user_id = ? AND action = 'login' ORDER BY id DESC LIMIT 1").get(u.id);
+  const link = db.prepare('SELECT expires_at, created_by FROM password_resets WHERE user_id = ? AND used_at IS NULL AND expires_at > ?').get(u.id, Date.now());
+  res.json({ account: { email: u.email, must_change: !!u.must_change, pw_changed_at: u.pw_changed_at, sessions: sess, last_login: last ? last.at : null, reset_link_pending: !!link, ...lockState(u.email) } });
+});
+const readablePw = () => { const W = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'; const b = crypto.randomBytes(14);
+  const core = [...b].map((x) => W[x % W.length]).join(''); return `${core.slice(0, 4)}-${core.slice(4, 8)}-${core.slice(8, 12)}${'!#%+'[b[12] % 4]}${2 + (b[13] % 8)}`; };
+admin.post('/contractors/:id/password/temp', (req, res) => {
+  const c = getContractor(idParam(req.params.id)); const u = acctFor(c.id);
+  const generated = !req.body.password; const pw = generated ? readablePw() : strong(String(req.body.password), u.email);
+  db.prepare("UPDATE users SET password_hash = ?, must_change = 1, pw_changed_at = datetime('now'), failed_logins = 0, locked_until = NULL WHERE id = ?").run(C.hashPassword(pw), u.id);
+  db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id); db.prepare('DELETE FROM password_resets WHERE user_id = ?').run(u.id); clearLockouts(u.email.toLowerCase());
+  changedMail(u, 'by an FFD administrator (temporary password — you must pick a new one at next sign-in)');
+  audit(req, 'temp_password_set', `${c.name} (${generated ? 'generated' : 'typed by admin'}; sessions ended; must change at next login)`);
+  res.set('Cache-Control', 'no-store').json({ ok: true, password: pw, generated, email: u.email }); // shown once, never stored in plain text
+});
+admin.post('/contractors/:id/password/reset-link', (req, res) => {
+  const c = getContractor(idParam(req.params.id)); const u = acctFor(c.id); const force = !!req.body.force;
+  if (force) { db.prepare('UPDATE users SET must_change = 1 WHERE id = ?').run(u.id); db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id); }
+  resetMail(u, issueReset(u, 'admin'), true);
+  audit(req, force ? 'password_force_reset' : 'password_reset_link_sent', `${c.name}${force ? ' (sessions ended; must change at next login)' : ''}`);
+  res.json({ ok: true, delivered: MAIL.provider() ? 'email' : 'outbox' });
+});
+admin.post('/contractors/:id/unlock', (req, res) => {
+  const c = getContractor(idParam(req.params.id)); const u = acctFor(c.id);
+  clearLockouts(u.email.toLowerCase()); db.prepare('UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?').run(u.id);
+  const n = db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id).changes;
+  audit(req, 'account_unlocked', `${c.name} (lockout cleared; ${n} session(s) ended)`); res.json({ ok: true, sessions_ended: n });
+});
+admin.get('/outbox', (req, res) => {
+  if (!DEMO_MODE && process.env.MAIL_OUTBOX !== '1') return res.json({ enabled: false, messages: [] });
+  res.set('Cache-Control', 'no-store').json({ enabled: true, provider: MAIL.provider() || null, messages: db.prepare('SELECT * FROM outbox ORDER BY id DESC LIMIT 200').all() });
 });
 admin.put('/contractors/:id/documents/:typeId', (req, res) => {
   const c = getContractor(idParam(req.params.id)); const typeId = idParam(req.params.typeId);
@@ -773,14 +896,19 @@ admin.get('/schedule', (req, res) => {
   const days = req.query.days === undefined ? 92 : V.int(req.query.days, 7, 186, 'days');
   const to = SCH.plus(from, days - 1);
   const titleF = req.query.title ? idParam(req.query.title) : null;
-  const cs = db.prepare('SELECT * FROM contractors ORDER BY name').all().filter((c) => !titleF || c.title_id === titleF);
-  const contractors = cs.map((c) => {
+  const siteF = req.query.site ? idParam(req.query.site) : null; const crewF = ['on', 'off', 'swing'].includes(req.query.crew) ? req.query.crew : '';
+  const onIn = (cid) => db.prepare("SELECT 1 FROM schedule_blocks WHERE contractor_id = ? AND kind = 'on' AND start <= ? AND end >= ?").get(cid, to, from);
+  const cs = db.prepare('SELECT * FROM contractors ORDER BY name').all().filter((c) => (!titleF || c.title_id === titleF) && (!siteF || c.destination_id === siteF)
+    && (!crewF || (crewF === 'swing' ? c.swing : crewF === 'on' ? onIn(c.id) : !onIn(c.id))));
+  const per = req.query.per === undefined ? 25 : V.int(req.query.per, 5, 500, 'per'); const pages = Math.max(1, Math.ceil(cs.length / per));
+  const page = Math.min(pages - 1, req.query.page === undefined ? 0 : V.int(req.query.page, 0, 1000, 'page'));
+  const contractors = cs.slice(page * per, page * per + per).map((c) => {
     const r = readiness(c);
     return { id: c.id, name: c.name, title: titleName(c.title_id), title_id: c.title_id, status: r.status, destination: destName(c.destination_id), rotation_on: c.rotation_on, rotation_off: c.rotation_off,
-      next_start: r.rotation.next_start, fix_by: r.fix_by,
+      next_start: r.rotation.next_start, fix_by: r.fix_by, swing: !!c.swing,
       blocks: db.prepare('SELECT * FROM schedule_blocks WHERE contractor_id = ? AND start <= ? AND end >= ? ORDER BY start').all(c.id, to, from) };
   });
-  res.json({ from, to, days, today: t, contractors, destinations: db.prepare('SELECT id, name, min_headcount, max_headcount FROM destinations ORDER BY name').all(),
+  res.json({ from, to, days, today: t, total: cs.length, page, pages, per, contractors, destinations: db.prepare('SELECT id, name, min_headcount, max_headcount FROM destinations ORDER BY name').all(),
     coverage: SCH.coverage(from, days), conflicts: SCH.conflicts(from, to, cs, readiness), titles: activeTitles() });
 });
 function blockFields(b) {
@@ -844,6 +972,80 @@ admin.put('/destinations/:id/targets', (req, res) => {
   if (max !== null && max < min) throw new V.VErr('Maximum is below minimum');
   db.prepare('UPDATE destinations SET min_headcount = ?, max_headcount = ? WHERE id = ?').run(min, max, d.id);
   audit(req, 'coverage_targets', `${d.name}: min ${min} max ${max ?? '—'}`); res.json({ ok: true });
+});
+// ---------------- Crew size, on-rotation targets, swing / fill-in ----------------
+const crewSettings = () => ({ total_target: Number(db.meta.get('crew_total_target') || 80), on_target: Number(db.meta.get('crew_on_target') || 25) });
+admin.put('/crew/settings', (req, res) => {
+  const total = V.int(req.body.total_target, 1, 5000, 'Total crew headcount'); const on = V.int(req.body.on_target, 0, 5000, 'Target on rotation');
+  if (on > total) throw new V.VErr('Target on rotation cannot exceed total headcount');
+  db.meta.set('crew_total_target', String(total)); db.meta.set('crew_on_target', String(on));
+  audit(req, 'crew_settings', `total ${total}, on rotation ${on}`); res.json({ ok: true, settings: crewSettings() });
+});
+admin.put('/contractors/:id/swing', (req, res) => {
+  const c = getContractor(idParam(req.params.id)); const v = req.body.swing ? 1 : 0;
+  db.prepare('UPDATE contractors SET swing = ? WHERE id = ?').run(v, c.id); audit(req, 'swing_flag', `${c.name}: ${v ? 'swing / fill-in' : 'regular rotation'}`); res.json({ ok: true, swing: !!v });
+});
+const busy = (cid, start, end) => db.prepare("SELECT * FROM schedule_blocks WHERE contractor_id = ? AND kind != 'off' AND start <= ? AND end >= ?").all(cid, end, start);
+function firstGap(siteCov) { // first run of days below target in a coverage row
+  let g = null;
+  for (const d of siteCov.days) {
+    if (d.state === 'gap') { if (!g) g = { start: d.date, end: d.date, short: 0 }; g.end = d.date; g.short = Math.max(g.short, siteCov.min - d.headcount); } else if (g) break;
+  }
+  return g;
+}
+function swingFit(c, siteId, start, end) {
+  const r = evaluate({ ...c, destination_id: siteId, deploy_date: start, _on: [{ kind: 'on', start, end, destination_id: siteId }] }, getReqs(siteId),
+    db.prepare('SELECT * FROM documents WHERE contractor_id = ?').all(c.id), db.prepare('SELECT * FROM blockers WHERE contractor_id = ?').all(c.id));
+  const clash = busy(c.id, start, end);
+  return { id: c.id, name: c.name, title: titleName(c.title_id), employee_no: c.employee_no, home_site: destName(c.destination_id), status: r.status,
+    issues: r.items.filter((i) => i.status !== 'green').map((i) => ({ name: i.name, status: i.status })).concat(r.blockers.map((b) => ({ name: b.description, status: 'red' }))),
+    available: !clash.length, busy: clash.map((b) => `${b.kind} ${b.start} → ${b.end}`), headshot: !!c.headshot_upload_id };
+}
+const rank = { green: 0, yellow: 1, red: 2 };
+admin.get('/crew', (req, res) => {
+  const day = req.query.date ? V.date(req.query.date, { name: 'Date' }) : fmtToday();
+  const cov = SCH.coverage(day, 90); const all = db.prepare('SELECT * FROM contractors ORDER BY name').all();
+  const sites = cov.map((sc) => { const t = sc.days[0]; const gap = firstGap(sc);
+    return { id: sc.site_id, name: sc.site, target: sc.min, max: sc.max, on: t.headcount, who: t.who, short: Math.max(0, sc.min - t.headcount), gap_days_90: sc.gap_days, next_gap: gap }; });
+  const swing = all.filter((c) => c.swing).map((c) => { const st = readiness(c).status; const on = db.prepare("SELECT * FROM schedule_blocks WHERE contractor_id = ? AND kind = 'on' AND end >= ? ORDER BY start LIMIT 1").get(c.id, day);
+    return { id: c.id, name: c.name, title: titleName(c.title_id), status: st, home_site: destName(c.destination_id), assigned: on ? { site: destName(on.destination_id), start: on.start, end: on.end, now: on.start <= day } : null }; });
+  res.json({ date: day, settings: crewSettings(), total: all.length, on_today: sites.reduce((a, x) => a + x.on, 0), swing_count: swing.length,
+    swing_ready: swing.filter((x) => x.status === 'green' && !(x.assigned && x.assigned.now)).length, sites, swing });
+});
+admin.get('/crew/suggest', (req, res) => {
+  const site = idParam(req.query.site); if (!db.prepare('SELECT 1 FROM destinations WHERE id = ?').get(site)) throw nf();
+  const start = V.date(req.query.start, { required: true, name: 'Start' }); const end = V.date(req.query.end, { required: true, name: 'End' });
+  if (end < start) throw new V.VErr('End is before start');
+  const list = db.prepare('SELECT * FROM contractors WHERE swing = 1 ORDER BY name').all().map((c) => swingFit(c, site, start, end))
+    .sort((a, b) => (b.available - a.available) || (rank[a.status] - rank[b.status]) || a.name.localeCompare(b.name));
+  res.json({ site: destName(site), start, end, suggestions: list });
+});
+admin.post('/crew/assign-swing', (req, res) => {
+  const c = getContractor(idParam(req.body.contractor_id)); const site = idParam(req.body.destination_id);
+  if (!db.prepare('SELECT 1 FROM destinations WHERE id = ?').get(site)) throw nf();
+  const start = V.date(req.body.start, { required: true, name: 'Start' }); const end = V.date(req.body.end, { required: true, name: 'End' });
+  if (end < start) throw new V.VErr('End is before start'); if (SCH.plus(start, 120) < end) throw new V.VErr('A swing assignment can be at most 120 days');
+  if (!c.swing) throw new V.VErr(`${c.name} is not in the swing / fill-in pool`);
+  const fit = swingFit(c, site, start, end);
+  if (!fit.available) throw new V.VErr(`${c.name} is already scheduled then (${fit.busy.join(', ')})`);
+  if (fit.status === 'red') throw new V.VErr(`${c.name} is RED for ${destName(site)} (${fit.issues.filter((i) => i.status === 'red').map((i) => i.name).join(', ')}) — fix that first`);
+  if (fit.status === 'yellow' && !req.body.allow_yellow) throw new V.VErr(`${c.name} is YELLOW for this assignment (${fit.issues.map((i) => i.name).join(', ')}). Confirm to assign anyway.`);
+  db.exec('BEGIN');
+  try {
+    for (const b of db.prepare("SELECT * FROM schedule_blocks WHERE contractor_id = ? AND kind = 'off' AND start <= ? AND end >= ?").all(c.id, end, start)) { // carve the ON out of OFF time
+      db.prepare('DELETE FROM schedule_blocks WHERE id = ?').run(b.id);
+      const ins = db.prepare('INSERT INTO schedule_blocks (contractor_id, kind, start, end, notes) VALUES (?,?,?,?,?)');
+      if (b.start < start) ins.run(c.id, 'off', b.start, SCH.plus(start, -1), b.notes);
+      if (b.end > end) ins.run(c.id, 'off', SCH.plus(end, 1), b.end, b.notes);
+    }
+    db.prepare("INSERT INTO schedule_blocks (contractor_id, kind, start, end, destination_id, notes) VALUES (?, 'on', ?, ?, ?, ?)").run(c.id, start, end, site, 'Swing fill-in assignment');
+    db.prepare('UPDATE contractors SET destination_id = ? WHERE id = ?').run(site, c.id);
+    SCH.sync(c.id);
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+  audit(req, 'swing_assigned', `${c.name} → ${destName(site)} ${start} → ${end} (${fit.status})`);
+  sendAlert([c.id], 'info', `Fill-in assignment: ${destName(site)}`, `You're scheduled ON at ${destName(site)} ${start} → ${end}. Check the Schedule tab; travel will be booked by the office.`, req.user.email);
+  res.json({ ok: true, status: fit.status });
 });
 // ---------------- Titles ----------------
 admin.get('/titles', (req, res) => res.json({ titles: db.prepare('SELECT t.*, (SELECT COUNT(*) FROM contractors c WHERE c.title_id = t.id) AS in_use FROM titles t ORDER BY sort, name').all() }));

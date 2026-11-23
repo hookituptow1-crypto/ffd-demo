@@ -25,7 +25,7 @@ async function login(email, pw) { const j = jar(); const r = await req(j, 'POST'
   const li = await (await fetch(BASE + '/js/login.js')).text(); ok('Exposure', 'login.js has no credentials / tap-to-fill', !li.includes('demo-info') && !li.includes(PW));
   ok('Exposure', '/api/demo-info is admin-only', (await req(null, 'GET', '/api/demo-info')).s === 401);
   ok('Robustness', '/health returns ok', (await req(null, 'GET', '/health')).json?.ok === true);
-  // sign in the sessions we need BEFORE the brute-force tests (failed logins rightly block this IP for 15 min)
+  // sign in the sessions we need BEFORE the brute-force tests (failed logins rightly block this IP for 5 min)
   const cody = await login('cody@ffd.demo', PW); const admin = await login('admin@ffd.demo', APW); const admin2 = await login('admin@ffd.demo', APW);
   const pre = jar(); pre.c = (BASE.startsWith('https') ? '__Host-ffd_sid' : 'ffd_sid') + '=attacker-chosen-session-token';
   const fx = await req(pre, 'POST', '/api/login', { email: 'ray@ffd.demo', password: PW }, { Origin: ORIGIN }); pre.csrf = fx.json && fx.json.csrf;
@@ -37,10 +37,10 @@ async function login(email, pw) { const j = jar(); const r = await req(j, 'POST'
   t0 = Date.now(); await req(jar(), 'POST', '/api/login', { email: 'trent@ffd.demo', password: 'abcdefgh' }, { Origin: ORIGIN }); const tP = Date.now() - t0;
   ok('Auth', 'Similar timing for unknown user vs wrong password', Math.abs(tU - tP) < 450, `${tU} ms vs ${tP} ms (random 300–600 ms delay on every failure)`);
   ok('Auth', 'SQL injection in login email is rejected', (await req(jar(), 'POST', '/api/login', { email: "' OR 1=1 --", password: "' OR '1'='1" }, { Origin: ORIGIN })).s === 401);
-  // lockout: 5 bad passwords for mike from this IP, then the right one is refused
-  for (let i = 0; i < 5; i++) await req(jar(), 'POST', '/api/login', { email: 'mike@ffd.demo', password: `nope-${i}-xxxxxxxx` }, { Origin: ORIGIN });
+  // lockout: 10 bad passwords for mike from this IP, then the right one is refused
+  for (let i = 0; i < 10; i++) await req(jar(), 'POST', '/api/login', { email: 'mike@ffd.demo', password: `nope-${i}-xxxxxxxx` }, { Origin: ORIGIN });
   const locked = await login('mike@ffd.demo', PW);
-  ok('Auth', 'Account+IP lockout after 5 failures (correct password refused for 15 min)', locked.status === 401);
+  ok('Auth', 'Account+IP lockout after 10 failures in 5 min (correct password refused; admin can unlock)', locked.status === 401);
   // session fixation + cookie flags
   ok('Auth', 'Session fixation: new random token issued at login', fx.s === 200 && !pre.c.includes('attacker-chosen'));
   const sc = pre.lastSetCookie || '';
@@ -50,7 +50,7 @@ async function login(email, pw) { const j = jar(); const r = await req(j, 'POST'
   ok('Auth', 'Logout invalidates the session server-side (old cookie rejected)', after.s === 401);
   // ---------- access control
   ok('Setup', 'Admin + contractor logins work', cody.status === 200 && admin.status === 200);
-  for (const p of ['/api/admin/contractors', '/api/admin/contractors/1', '/api/admin/tracking', '/api/admin/audit', '/api/admin/reports/daily', '/api/admin/schedule', '/api/admin/titles'])
+  for (const p of ['/api/admin/contractors', '/api/admin/contractors/1', '/api/admin/tracking', '/api/admin/audit', '/api/admin/reports/daily', '/api/admin/schedule', '/api/admin/titles', '/api/admin/outbox', '/api/admin/crew', '/api/admin/contractors/1/account'])
     ok('Access control', `Contractor blocked from ${p}`, (await req(cody, 'GET', p)).s === 403);
   const cl = (await req(admin, 'GET', '/api/admin/contractors')).json.contractors; const codyId = cl.find((c) => c.name === 'Cody Ramirez').id; const other = cl.find((c) => c.name === 'Ray Castillo').id;
   const ups = (await req(admin, 'GET', `/api/admin/contractors/${other}`)).json.uploads;

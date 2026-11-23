@@ -24,4 +24,6 @@ const limit = (name, max, windowMs, keyFn) => (req, res, next) => {
   res.set('Retry-After', String(r.retryAfter));
   res.status(429).json({ error: 'Too many requests — please slow down and try again shortly.' });
 };
-module.exports = { clientIp, hit, peek, reset, limit };
+function resetMatching(re) { for (const k of [...buckets.keys()]) if (re.test(k)) buckets.delete(k); }
+function peekMatching(re, windowMs) { let m = 0; const now = Date.now(); for (const [k, b] of buckets) if (re.test(k) && now - b.start < windowMs) m = Math.max(m, b.n); return m; }
+module.exports = { clientIp, hit, peek, reset, resetMatching, peekMatching, limit };

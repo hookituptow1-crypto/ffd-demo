@@ -57,7 +57,8 @@ const SITE_COL = ['#4f7a2b', '#2b6d7a', '#7a5a2b', '#5a2b7a', '#2b7a52', '#7a2b4
 const DW = 16; // px per day
 async function schedulePage(qs) {
   const q = new URLSearchParams(qs || ''); if (!A.dests) await loadDests();
-  const p = new URLSearchParams(); if (q.get('from')) p.set('from', q.get('from')); if (q.get('title')) p.set('title', q.get('title'));
+  const p = new URLSearchParams(); ['from', 'title', 'site', 'crew', 'page'].forEach((k) => { if (q.get(k)) p.set(k, q.get(k)); });
+  const go = (k, v) => { const np = new URLSearchParams(p); if (v === '' || v === null) np.delete(k); else np.set(k, v); if (k !== 'page') np.delete('page'); location.hash = `#/schedule?${np}`; };
   const d = await api('GET', `/api/admin/schedule?${p}`); const from = d.from; const N = d.days;
   const siteIdx = Object.fromEntries(d.destinations.map((x, i) => [x.id, i])); const siteName = Object.fromEntries(d.destinations.map((x) => [x.id, x.name]));
   const off = (iso) => Math.round((Date.parse(iso) - Date.parse(from)) / 86400000);
@@ -74,7 +75,10 @@ async function schedulePage(qs) {
   const W = N * DW;
   main().innerHTML = `<div class="head"><h1>🗓️ Crew schedule</h1><span class="mut small">${fdate(d.from)} → ${fdate(d.to)}</span>
       <div class="right row"><button class="btn" data-mv="-1">◀ Month</button><button class="btn" data-mv="0">This month</button><button class="btn" data-mv="1">Month ▶</button>
-      <select id="sTitle" class="wauto">${titleOpts(d.titles, q.get('title'))}</select></div></div>
+      <select id="sTitle" class="wauto">${titleOpts(d.titles, q.get('title'))}</select>
+      <select id="sSite" class="wauto"><option value="">All sites</option>${d.destinations.map((x) => `<option value="${x.id}" ${String(x.id) === q.get('site') ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+      <select id="sCrew" class="wauto">${[['', 'All crew'], ['on', 'On rotation in view'], ['off', 'Off in view'], ['swing', 'Swing / fill-in']].map(([v, t]) => `<option value="${v}" ${(q.get('crew') || '') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div></div>
+    <div class="pager mb"><span class="small mut">${d.total} people · showing ${d.total ? d.page * d.per + 1 : 0}–${d.page * d.per + d.contractors.length}</span>${d.pages > 1 ? `<button class="btn sm" id="sgP" ${d.page ? '' : 'disabled'}>‹ Prev</button><span class="small">Page ${d.page + 1} / ${d.pages}</span><button class="btn sm" id="sgN" ${d.page < d.pages - 1 ? '' : 'disabled'}>Next ›</button>` : ''}</div>
     <div class="legend small mb">${d.destinations.map((x, i) => `<span><i data-style="background:${SITE_COL[i % SITE_COL.length]}"></i>ON · ${esc(x.name)}</span>`).join('')}<span><i class="k-off"></i>OFF</span><span><i class="k-travel"></i>✈ Travel day</span><span><i class="k-training"></i>Training</span><span><i class="k-leave"></i>Leave</span><span><i class="conflict"></i>Readiness conflict</span>
       <span class="mut">Drag a block to move it · click a block to edit · click an empty day to add</span></div>
     <div class="card gantt-card"><div class="gantt"><div class="g-names"><div class="g-hd">Contractor</div>${d.contractors.map((c) => `<div class="g-name"><div class="nm">${av(c.id)}<div><a href="#/c/${c.id}"><b>${esc(c.name)}</b></a> <span class="dot ${c.status}"></span><div class="small mut">${esc(c.title || '—')} · ${c.rotation_on}/${c.rotation_off}</div></div><button class="btn sm right" data-gen="${c.id}" title="Rotation pattern">⚙</button></div></div>`).join('')}
@@ -93,8 +97,10 @@ async function schedulePage(qs) {
   const reload = () => schedulePage(qs);
   $$('[data-mv]').forEach((b) => b.addEventListener('click', () => { const mv = +b.dataset.mv; let f = d.today.slice(0, 8) + '01';
     if (mv) { const dt = new Date(Date.parse(from)); dt.setUTCMonth(dt.getUTCMonth() + mv); f = dt.toISOString().slice(0, 10); }
-    const np = new URLSearchParams(); np.set('from', f); if (q.get('title')) np.set('title', q.get('title')); location.hash = `#/schedule?${np}`; }));
-  $('#sTitle').addEventListener('change', (e) => { const np = new URLSearchParams(); if (q.get('from')) np.set('from', q.get('from')); if (e.target.value) np.set('title', e.target.value); location.hash = `#/schedule?${np}`; });
+    const np = new URLSearchParams(p); np.set('from', f); location.hash = `#/schedule?${np}`; }));
+  $('#sTitle').addEventListener('change', (e) => go('title', e.target.value));
+  $('#sSite').addEventListener('change', (e) => go('site', e.target.value)); $('#sCrew').addEventListener('change', (e) => go('crew', e.target.value));
+  $('#sgP')?.addEventListener('click', () => go('page', d.page - 1)); $('#sgN')?.addEventListener('click', () => go('page', d.page + 1));
   const allBlocks = Object.fromEntries(d.contractors.flatMap((c) => c.blocks.map((b) => [b.id, { ...b, cname: c.name }])));
   // drag to move (snaps to whole days); a click without movement opens the editor
   $$('.g-blk').forEach((el) => {
@@ -159,4 +165,62 @@ async function titlesPage() {
   $$('[data-act]').forEach((b) => b.addEventListener('click', () => guard(async () => { await api('PUT', `/api/admin/titles/${b.dataset.act}`, { active: b.dataset.v === '1' }); titlesPage(); })));
   $$('[data-del]').forEach((b) => b.addEventListener('click', () => guard(async () => { if (!confirm('Delete this unused title?')) return; await api('DELETE', `/api/admin/titles/${b.dataset.del}`); titlesPage(); })));
   $('#tAdd').addEventListener('click', () => guard(async () => { await api('POST', '/api/admin/titles', { name: $('#tNew').value }); toast('Title added'); titlesPage(); }));
+}
+
+// ---------------- Crew & coverage: headcount settings, on-rotation vs target, swing / fill-in pool ----------------
+async function crewPage(qs) {
+  const q = new URLSearchParams(qs || ''); const day = q.get('date') || '';
+  const d = await api('GET', `/api/admin/crew${day ? `?date=${encodeURIComponent(day)}` : ''}`);
+  const st = d.settings; const siteSum = d.sites.reduce((a, s) => a + s.target, 0);
+  const tile = (n, lbl, sub, cls = '') => `<div class="tile ${cls}"><div class="n">${n}</div><div class="l">${lbl}</div>${sub ? `<div class="small mut">${sub}</div>` : ''}</div>`;
+  main().innerHTML = `<div class="head"><h1>👥 Crew &amp; coverage</h1><span class="mut small">as of ${fdate(d.date)}</span>
+      <input type="date" id="cwD" value="${esc(d.date)}" class="wauto right"></div>
+    <div class="tiles mb">${tile(`${d.total}<span class="mut small"> / ${st.total_target}</span>`, 'Total crew', d.total === st.total_target ? 'at headcount' : `${d.total < st.total_target ? st.total_target - d.total + ' open' : d.total - st.total_target + ' over'} vs target`)}
+      ${tile(`${d.on_today}<span class="mut small"> / ${st.on_target}</span>`, 'On rotation today', d.on_today >= st.on_target ? 'target met' : `${st.on_target - d.on_today} short of target`, d.on_today >= st.on_target ? 'green' : 'yellow')}
+      ${tile(d.swing_count, 'Swing / fill-in pool', `${d.swing_ready} ready (green) and unassigned`, 'blue')}
+      ${tile(d.sites.filter((s) => s.short).length, 'Sites short today', d.sites.filter((s) => s.short).map((s) => esc(s.name.split(',')[0])).join(', ') || 'none', d.sites.some((s) => s.short) ? 'red' : 'green')}</div>
+    <div class="grid2 wauto">
+      <div class="card"><h2>Coverage by site</h2>
+        <table class="tbl"><thead><tr><th>Site</th><th>On today / target</th><th>Next gap (90 days)</th><th></th></tr></thead><tbody>
+        ${d.sites.map((s) => `<tr><td><b>${esc(s.name)}</b><div class="small mut">${s.who.map(esc).join(', ') || '—'}</div></td>
+          <td>${s.short ? `<span class="pill red">${s.on} / ${s.target}</span> <span class="small">short ${s.short}</span>` : `<span class="pill green">${s.on} / ${s.target}</span>`}${s.max && s.on > s.max ? ' <span class="pill yellow">over max</span>' : ''}</td>
+          <td class="small">${s.next_gap ? `${fdate(s.next_gap.start)} → ${fdate(s.next_gap.end)} · short ${s.next_gap.short}` : '<span class="mut">none</span>'}<div class="mut">${s.gap_days_90} gap day(s) in 90</div></td>
+          <td><button class="btn sm pri" data-assign="${s.id}" ${s.next_gap ? '' : 'disabled'}>Assign swing</button> <button class="btn sm" data-tgt="${s.id}">Target</button></td></tr>`).join('')}
+        </tbody></table>
+        <p class="small mut">Per-site targets add up to ${siteSum}${siteSum !== st.on_target ? ` — <b>overall target is ${st.on_target}</b>` : ' (matches the overall target)'}. Gaps also show on the <a href="#/schedule">Schedule</a> coverage rows.</p></div>
+      <div class="card"><h2>Headcount settings</h2>
+        <div class="grid2"><div><label>Total crew headcount</label><input id="cwT" type="number" min="1" value="${st.total_target}"></div><div><label>Target on rotation (overall)</label><input id="cwO" type="number" min="0" value="${st.on_target}"></div></div>
+        <button class="btn pri mt" id="cwSave">Save settings</button>
+        <h2 class="mt">Swing / fill-in pool</h2>
+        ${d.swing.map((p) => `<div class="row swrow">${av(p.id)}<div><a href="#/c/${p.id}"><b>${esc(p.name)}</b></a><div class="small mut">${esc(p.title || '')} · ${esc(p.home_site)}</div></div>
+          <span class="right">${pill(p.status)} ${p.assigned ? `<span class="pill blue">${p.assigned.now ? 'at' : 'booked'} ${esc(p.assigned.site.split(',')[0])} ${fdate(p.assigned.start)} → ${fdate(p.assigned.end)}</span>` : '<span class="pill gray">available</span>'}</span></div>`).join('') || '<p class="small mut">No one is flagged as swing yet. Open a contractor → Edit → “Swing / fill-in”.</p>'}
+      </div></div>`;
+  $('#cwD').addEventListener('change', (e) => { location.hash = `#/crew?date=${e.target.value}`; });
+  $('#cwSave').addEventListener('click', () => guard(async () => { await api('PUT', '/api/admin/crew/settings', { total_target: +$('#cwT').value, on_target: +$('#cwO').value }); toast('Settings saved'); crewPage(qs); }));
+  $$('[data-tgt]').forEach((b) => b.addEventListener('click', () => { const s = d.sites.find((x) => x.id === +b.dataset.tgt);
+    modal(`<div class="row"><h2>Target — ${esc(s.name)}</h2><button class="btn sm right" data-close>✕</button></div>
+      <div class="grid2"><div><label>Target on rotation (minimum)</label><input id="tMin" type="number" min="0" value="${s.target}"></div><div><label>Overstaffed above (optional)</label><input id="tMax" type="number" min="1" value="${s.max ?? ''}"></div></div>
+      <button class="btn pri mt" id="tSave">Save</button>`, (m, close) => $('#tSave', m).addEventListener('click', () => guard(async () => {
+      await api('PUT', `/api/admin/destinations/${s.id}/targets`, { min: +$('#tMin', m).value, max: $('#tMax', m).value === '' ? null : +$('#tMax', m).value }); close(); crewPage(qs); }))); }));
+  $$('[data-assign]').forEach((b) => b.addEventListener('click', () => { const s = d.sites.find((x) => x.id === +b.dataset.assign); assignSwing(s, () => crewPage(qs)); }));
+}
+async function assignSwing(s, reload) {
+  const g0 = s.next_gap; const g = g0 ? { ...g0, end: g0.end < isoAdd(g0.start, 29) ? isoAdd(g0.start, 29) : g0.end } : { start: isoAdd(new Date().toISOString().slice(0, 10), 0), end: isoAdd(new Date().toISOString().slice(0, 10), 29) };
+  modal(`<div class="row"><h2>Assign swing — ${esc(s.name)}</h2><button class="btn sm right" data-close>✕</button></div>
+    <p class="small mut">${g0 ? `Gap: ${fdate(g0.start)} → ${fdate(g0.end)}, short ${g0.short}. Default fill-in is at least 30 days — adjust the dates if needed.` : ''} Suggestions are checked against <b>this site's</b> requirements for these dates; ready (green) and available people are listed first.</p>
+    <div class="grid2"><div><label>Start</label><input id="aS" type="date" value="${esc(g.start)}"></div><div><label>End (inclusive)</label><input id="aE" type="date" value="${esc(g.end)}"></div></div>
+    <div id="aList" class="mt"><p class="mut small">Loading…</p></div>`, (m, close) => {
+    const load = () => guard(async () => {
+      const r = await api('GET', `/api/admin/crew/suggest?site=${s.id}&start=${$('#aS', m).value}&end=${$('#aE', m).value}`);
+      $('#aList', m).innerHTML = r.suggestions.map((p, i) => `<div class="row swrow ${p.available && p.status !== 'red' ? '' : 'dim'}">${av(p.id)}<div><b>${esc(p.name)}</b>${i === 0 && p.available && p.status === 'green' ? ' <span class="pill green">suggested</span>' : ''}
+          <div class="small mut">${esc(p.title || '')} · home site ${esc(p.home_site)}${p.issues.length ? ` · ${p.issues.map((x) => esc(x.name)).join(', ')}` : ''}${p.available ? '' : ` · busy: ${p.busy.map(esc).join('; ')}`}</div></div>
+          <span class="right">${pill(p.status)} <button class="btn sm ${p.status === 'green' ? 'pri' : ''}" data-pick="${p.id}" data-st="${p.status}" ${p.available && p.status !== 'red' ? '' : 'disabled'}>Assign</button></span></div>`).join('') || '<p class="small">No swing people in the pool.</p>';
+      $$('[data-pick]', m).forEach((x) => x.addEventListener('click', () => guard(async () => {
+        const yellow = x.dataset.st === 'yellow';
+        if (yellow && !confirm('This person is YELLOW for the assignment (something lapses). Assign anyway?')) return;
+        await api('POST', '/api/admin/crew/assign-swing', { contractor_id: +x.dataset.pick, destination_id: s.id, start: $('#aS', m).value, end: $('#aE', m).value, allow_yellow: yellow });
+        close(); toast('Swing assigned — contractor alerted'); reload(); })));
+    });
+    $('#aS', m).addEventListener('change', load); $('#aE', m).addEventListener('change', load); load();
+  });
 }

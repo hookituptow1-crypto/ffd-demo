@@ -22,7 +22,7 @@ function syncPasswords() {
   const pw = demoPasswords(); let n = 0;
   for (const u of db.prepare("SELECT id, role, password_hash FROM users WHERE email LIKE '%@ffd.demo'").all()) {
     const want = u.role === 'admin' ? pw.admin : pw.contractor;
-    if (!verifyPassword(want, u.password_hash)) { db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(want), u.id); n++; }
+    if (!verifyPassword(want, u.password_hash)) { db.prepare('UPDATE users SET password_hash = ?, must_change = 0 WHERE id = ?').run(hashPassword(want), u.id); db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id); n++; }
   }
   return n;
 }
@@ -33,7 +33,7 @@ function seed() {
   // remove encrypted files of the uploads we're about to drop (keeps the disk from filling up across nightly resets)
   const UP = path.join(__dirname, '..', 'data', 'uploads');
   for (const u of db.prepare('SELECT file FROM uploads').all()) { try { fs.unlinkSync(path.join(UP, u.file)); } catch {} }
-  db.exec(`DELETE FROM sessions; DELETE FROM push_subs; DELETE FROM schedule_blocks; DELETE FROM checkins; DELETE FROM admin_alerts; DELETE FROM alerts; DELETE FROM uploads; DELETE FROM flights;
+  db.exec(`DELETE FROM sessions; DELETE FROM outbox; DELETE FROM password_resets; DELETE FROM push_subs; DELETE FROM schedule_blocks; DELETE FROM checkins; DELETE FROM admin_alerts; DELETE FROM alerts; DELETE FROM uploads; DELETE FROM flights;
     DELETE FROM blockers; DELETE FROM documents; DELETE FROM profiles; DELETE FROM users; DELETE FROM contractors;
     DELETE FROM destination_requirements; DELETE FROM destinations; DELETE FROM requirement_types;`); // audit_log is kept across resets
 
@@ -57,6 +57,7 @@ function seed() {
   ].forEach((r) => { R[r[0]] = Number(rt.run(...r).lastInsertRowid); });
   db.prepare("UPDATE requirement_types SET is_check = 1, validity_days = 365 WHERE name = 'Background Check'").run();
 
+  const SITE_TARGET = { 'Erbil, Iraq': [8, 10], 'Camp Arifjan, Kuwait': [7, 9], 'Camp Lemonnier, Djibouti': [6, 8], 'Niamey, Niger': [4, 6] };
   const dest = db.prepare('INSERT INTO destinations (name, country, region, airport, notes) VALUES (?,?,?,?,?)');
   const dr = db.prepare('INSERT INTO destination_requirements VALUES (?,?)');
   const D = {};
@@ -68,7 +69,7 @@ function seed() {
     ['Niamey, Niger', 'Niger', 'Africa', 'NIM', 'Sahel site', [...common, 'Niger Visa', 'Yellow Fever Vaccine', 'Meningococcal ACWY']],
   ].forEach(([n, c, r, a, notes, reqs]) => {
     const id = Number(dest.run(n, c, r, a, notes).lastInsertRowid); D[n] = id;
-    const tgt = { 'Erbil, Iraq': [1, 4], 'Camp Arifjan, Kuwait': [2, null] }[n] || [0, null]; // headcount targets (min, max) — Arifjan gap, Erbil overstaffed
+    const tgt = SITE_TARGET[n]; // on-rotation target per site (min) and overstaffed above (max); sums to the 25 overall target
     db.prepare('UPDATE destinations SET min_headcount = ?, max_headcount = ? WHERE id = ?').run(tgt[0], tgt[1], id);
     reqs.forEach((q) => dr.run(id, R[q]));
   });
@@ -102,6 +103,35 @@ function seed() {
     ['Mike Brennan', 'RT-1012', 'Green — deployed now (Niger), check-in OVERDUE', 'Niamey, Niger', -10, {}, null, null, 'TUS', 'PHX'],
     ['David Tran', 'RT-1013', 'Showcase — green, fully complete profile, deployed Djibouti', 'Camp Lemonnier, Djibouti', -20, {}, null, null, 'SEA', 'PDX'],
   ];
+  // ---- 67 more fictional crew (seed-assets/crew.json, one AI portrait each) -> ~80 total, ~25 on rotation, 5 swing ----
+  // Rotational crew fly 60 on / 120 off (so ~1/3 are deployed on any day); phases are spread evenly per site.
+  const CREW = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'seed-assets', 'crew.json'), 'utf8'));
+  const GEN = {};
+  const SITES = ['Erbil, Iraq', 'Camp Arifjan, Kuwait', 'Camp Lemonnier, Djibouti', 'Niamey, Niger'];
+  const PLAN = { 'Erbil, Iraq': 16, 'Camp Arifjan, Kuwait': 15, 'Camp Lemonnier, Djibouti': 11, 'Niamey, Niger': 10 }; // rotational crew per site
+  const SITE_PHASE = { 'Erbil, Iraq': 3, 'Camp Arifjan, Kuwait': 9, 'Camp Lemonnier, Djibouti': 5, 'Niamey, Niger': 11 };
+  const TITLE_MIX = ['Aircraft Maintenance Technician', 'A&P Mechanic', 'Aircraft Maintenance Technician', 'Avionics Technician', 'A&P Mechanic', 'Aircraft Maintenance Technician',
+    'Crew Chief', 'A&P Mechanic', 'Inspector / QA', 'Aircraft Maintenance Technician', 'Avionics Technician', 'Lead', 'Aircraft Maintenance Technician', 'A&P Mechanic', 'Supervisor',
+    'Avionics Technician', 'Aircraft Maintenance Technician', 'Crew Chief', 'A&P Mechanic', 'Site Manager'];
+  const YELLOW_DOC = ['Typhoid', 'Passport', 'Tdap (Tetanus)', "Government ID / Driver's License"];
+  let k = 0;
+  const take = () => CREW[k++];
+  // 5 swing / fill-in people: no fixed rotation; 3 green, 1 yellow, 1 red
+  [['Erbil, Iraq', {}], ['Camp Arifjan, Kuwait', {}], ['Camp Lemonnier, Djibouti', {}], ['Camp Arifjan, Kuwait', { 'Passport': 300 }], ['Erbil, Iraq', { 'Iraq Work Visa': 'missing' }]]
+    .forEach(([site, exc], j) => { const p = take(); GEN[p.name] = { ...p, kind: 'swing', site, title: ['A&P Mechanic', 'Aircraft Maintenance Technician', 'Avionics Technician', 'Crew Chief', 'A&P Mechanic'][j] };
+      people.push([p.name, p.emp, `Swing / fill-in — ${Object.keys(exc).length ? (Object.values(exc)[0] === 'missing' ? 'RED (missing visa), not assignable' : 'YELLOW (passport renewal due)') : 'ready to fill gaps'}`, site, 7 + j, exc, null, null, p.home, p.alt]); });
+  // rotational crew, evenly phased per site
+  let g = 0;
+  for (const site of SITES) for (let j = 0; j < PLAN[site]; j++) {
+    const p = take(); const ph = (SITE_PHASE[site] + Math.round((j * 180) / PLAN[site])) % 180; const off = ph - 60; // -60..119
+    const exc = { 'Medical Fitness Clearance': 330 + (g % 5) * 6, 'Background Check': 330 + (g % 6) * 5 }; if (g % 9 === 4) exc[YELLOW_DOC[g % 4]] = off + 200 > 0 ? Math.max(30, off + 150) : 30; if (g % 23 === 11) exc['Hepatitis A'] = 'missing';
+    GEN[p.name] = { ...p, kind: 'rot', site, off, title: TITLE_MIX[g % TITLE_MIX.length] };
+    people.push([p.name, p.emp, `Rotational crew — 60 on / 120 off (${site.split(',')[0]})`, site, off, exc, null, null, p.home, p.alt]); g++;
+  }
+  // everyone else: between rotations (next rotation 2-5 months out)
+  while (k < CREW.length) { const p = take(); const site = SITES[k % 4]; const off = 40 + ((k * 23) % 60);
+    GEN[p.name] = { ...p, kind: 'reserve', site, off, title: TITLE_MIX[(k * 7) % TITLE_MIX.length] };
+    people.push([p.name, p.emp, 'Off — between rotations', site, off, { 'Medical Fitness Clearance': 340, 'Background Check': 345 }, null, null, p.home, p.alt]); }
   const LOOK = { // gender, age, hair, eyes, height ft/in, weight — matches the generated headshot in seed-assets/headshots/<emp>.jpg
     'Marcus Delgado': ['Male', 29, 'Black', 'Brown', '5', '10', '182'], 'Dana Whitfield': ['Female', 31, 'Blond', 'Blue', '5', '6', '138'],
     'Tyler Brandt': ['Male', 33, 'Brown', 'Hazel', '6', '1', '190'], 'Cody Ramirez': ['Male', 35, 'Black', 'Brown', '5', '9', '178'],
@@ -122,8 +152,9 @@ function seed() {
     const cid = Number(ins.run(name, emp, phone, email, home, alt, D[dn], d(off), ovr, ovr ? ovrReason : null, scenario).lastInsertRowid);
     ids[name] = cid;
     user.run(email, pwHash, 'contractor', cid);
-    const destReqs = reqsFor.all(D[dn]);
-    const look = LOOK[name] || ['Male', 29 + i * 2, 'Brown', 'Brown', '5', '10', '185'];
+    const destReqs = GEN[name] && GEN[name].kind === 'swing' ? db.prepare('SELECT * FROM requirement_types').all() : reqsFor.all(D[dn]); // swing crew float, so they hold every site's visas/shots
+    const G = GEN[name]; const hw = (G && G.gender === 'Female') ? [['5', '4', '132'], ['5', '6', '141'], ['5', '7', '150'], ['5', '3', '126']][i % 4] : [['5', '9', '176'], ['5', '11', '188'], ['6', '0', '196'], ['5', '10', '182'], ['6', '2', '210']][i % 5];
+    const look = LOOK[name] || (G ? [G.gender, G.age, G.hair, G.eyes, ...hw] : ['Male', 29 + i * 2, 'Brown', 'Brown', '5', '10', '185']);
     const pp = {};
     for (const r of destReqs) {
       const e = r.name in exc ? exc[r.name] : GOOD[r.name];
@@ -147,7 +178,7 @@ function seed() {
       personal: { legal_first: fn, legal_middle: '', legal_last: ln.join(' '), preferred_name: '', dob: fmt(addDays(T, -365 * look[1] - i * 41)),
         place_of_birth: ['Houston, TX', 'Fort Worth, TX', 'Macon, GA', 'El Paso, TX', 'Pueblo, CO', 'San Antonio, TX', 'Beaumont, TX', 'Slidell, LA', 'Tulsa, OK'][i % 9],
         citizenship: 'United States', second_citizenship: '', gender: look[0],
-        phone, alt_phone: i % 2 ? '' : `(555) 01${String(i).padStart(2, '0')}-9${100 + i * 3}`, email: `${first}.${ln.join('').toLowerCase()}@example.com`, address: { line1: `${100 + i * 111} Demo Ranch Rd`, line2: '', city: HOMEC(home)[0], state: HOMEC(home)[1], postal: HOMEC(home)[2], country: 'USA' } },
+        phone, alt_phone: i % 2 ? '' : `(555) 01${String(i).padStart(2, '0')}-9${100 + i * 3}`, email: `${first}.${ln.join('').toLowerCase().replace(/[^a-z]/g, '')}@example.com`, address: { line1: `${100 + i * 111} Demo Ranch Rd`, line2: '', city: HOMEC(home)[0], state: HOMEC(home)[1], postal: HOMEC(home)[2], country: 'USA' } },
       travel: { home_airport: home, alt_airport: alt || '' },
       emergency_contacts: [
         { name: `${['Pat', 'Chris', 'Jordan', 'Maria', 'Sam', 'Lee', 'Jane', 'Alex', 'Kim'][i % 9]} ${ln.join(' ')}`, relationship: ['Spouse', 'Husband', 'Wife', 'Wife', 'Mother', 'Spouse', 'Wife', 'Brother', 'Wife'][i % 9],
@@ -168,7 +199,7 @@ function seed() {
       medical: { blood_type: ['O+', 'A+', 'B+', 'O-', 'A-', 'AB+', 'O+', 'B-', 'A+'][i % 9], allergies: ['Penicillin', 'None known', 'Seasonal pollen', 'Penicillin', 'Shellfish', 'None known', 'Penicillin, bee stings', 'Sulfa drugs', 'None known'][i % 9],
         conditions: ['Controlled hypertension', 'None', 'Mild seasonal allergies', 'None', 'Hypothyroidism (controlled)', 'High cholesterol', 'None', 'GERD', 'Type 2 diabetes (controlled)'][i % 9], medications: '', notes: '' },
       clearances: pp['Medical Fitness Clearance'] ? [{ type: 'Medical Fitness', level: 'Fit for deployment', granted: pp['Medical Fitness Clearance'].issued, expires: pp['Medical Fitness Clearance'].expires }] : [],
-      employment: { employer: 'FFD Demo Services LLC', position: ['Crew Chief', 'Inspector / QA', 'Avionics Technician', 'A&P Mechanic', 'Aircraft Maintenance Technician', 'A&P Mechanic', 'Aircraft Maintenance Technician', 'Avionics Technician', 'Supervisor', 'Lead', 'Aircraft Maintenance Technician', 'Site Manager', 'Lead'][i] || 'Aircraft Maintenance Technician',
+      employment: { employer: 'FFD Demo Services LLC', position: GEN[name] ? GEN[name].title : ['Crew Chief', 'Inspector / QA', 'Avionics Technician', 'A&P Mechanic', 'Aircraft Maintenance Technician', 'A&P Mechanic', 'Aircraft Maintenance Technician', 'Avionics Technician', 'Supervisor', 'Lead', 'Aircraft Maintenance Technician', 'Site Manager', 'Lead'][i] || 'Aircraft Maintenance Technician',
         employee_no: emp, supervisor: 'Ops Manager (Demo)', start_date: d(-700 - i * 90) },
     }), 'seed');
   });
@@ -177,6 +208,14 @@ function seed() {
   const SCH = require('./schedule');
   const hist = db.prepare('INSERT INTO schedule_blocks (contractor_id, kind, start, end, destination_id, notes) VALUES (?,?,?,?,?,?)');
   people.forEach(([name, , , dn, off]) => {
+    if (GEN[name]) { // generated crew: 60 on / 120 off from one cycle back; swing people just have an open availability window
+      const G = GEN[name]; const cid = ids[name];
+      db.prepare('UPDATE contractors SET rotation_off = ?, swing = ? WHERE id = ?').run(G.kind === 'swing' ? 30 : 120, G.kind === 'swing' ? 1 : 0, cid);
+      if (G.kind === 'swing') { hist.run(cid, 'off', d(-60), d(120), null, 'Swing / fill-in pool — available to cover gaps'); return; }
+      if (G.kind === 'reserve') { SCH.generate(cid, d(off - 240), 60, 120, D[dn], 1); db.prepare('UPDATE contractors SET deploy_date = ? WHERE id = ?').run(d(off), cid); return; } // last rotation done; next not scheduled yet
+      SCH.generate(cid, d(off - 180), 60, 120, D[dn], 3);
+      return;
+    }
     // past rotations: step back 90 days per cycle; if one would still be running today the guy had an extended break instead
     let p = off - 90; while (p + 60 >= 0) p -= 15;
     const starts = [p - 90, p].filter((x) => x + 60 >= -100);
@@ -202,6 +241,7 @@ function seed() {
   const pick = { 'Marcus Delgado': 'Crew Chief', 'Dana Whitfield': 'Inspector / QA', 'Tyler Brandt': 'Avionics Technician', 'Cody Ramirez': 'A&P Mechanic', 'Brianna Holt': 'Aircraft Maintenance Technician',
     'Wes Calloway': 'A&P Mechanic', 'John Doe': 'Aircraft Maintenance Technician', 'Sam Kowalski': 'Avionics Technician', 'Trent Vaughn': 'Supervisor', 'Ray Castillo': 'Lead',
     'Luis Fontaine': 'Aircraft Maintenance Technician', 'Mike Brennan': 'Site Manager', 'David Tran': 'Lead' };
+  Object.values(GEN).forEach((G) => { pick[G.name] = G.title; });
   for (const [n, t] of Object.entries(pick)) db.prepare('UPDATE contractors SET title_id = (SELECT id FROM titles WHERE name = ?) WHERE id = ?').run(t, ids[n]);
 
   const flIns = db.prepare(`INSERT INTO flights (contractor_id, airline, flight_no, from_airport, to_airport, depart_at, arrive_at, confirmation, seat, notes, sent_at, seen_at, direction)
@@ -238,6 +278,43 @@ function seed() {
     db.prepare("UPDATE contractors SET tracking_consent = 1, tracking_consent_at = datetime('now', '-9 days') WHERE id = ?").run(ids[n]);
     times.forEach((t, j) => ci.run(ids[n], j === times.length - 1 ? 'checkin' : 'auto', enc({ lat: lat + (j - 1) * 0.004 + k * 0.001, lng: lng + (j - 1) * 0.003, acc: 25 + j * 10 }), t));
   });
+  // Generated crew: linked flights for the current / most recent rotation (outbound + return) and anything starting in the next 3 weeks
+  const ROUTE = { EBL: [['Qatar Airways', 'QR 730', 'DOH', '16:25', '+1 15:50'], ['Qatar Airways', 'QR 450', 'EBL', '+1 20:10', '+1 22:40']],
+    KWI: [['Qatar Airways', 'QR 730', 'DOH', '16:25', '+1 15:50'], ['Qatar Airways', 'QR 1072', 'KWI', '+1 19:05', '+1 20:10']],
+    JIB: [['Emirates', 'EK 222', 'DXB', '19:55', '+1 18:35'], ['Flydubai', 'FZ 621', 'JIB', '+2 07:55', '+2 10:20']],
+    NIM: [['Air France', 'AF 23', 'CDG', '15:30', '+1 07:10'], ['Air France', 'AF 516', 'NIM', '+1 10:35', '+1 15:05']] };
+  const BACK = { EBL: [['Qatar Airways', 'QR 451', 'DOH', '23:55', '+1 01:45'], ['Qatar Airways', 'QR 731', 'DFW', '+1 08:20', '+1 15:05']],
+    KWI: [['Qatar Airways', 'QR 1077', 'DOH', '07:40', '08:45'], ['Qatar Airways', 'QR 731', 'DFW', '+1 08:20', '+1 15:05']],
+    JIB: [['Flydubai', 'FZ 622', 'DXB', '03:15', '08:00'], ['Emirates', 'EK 221', 'DFW', '09:30', '15:20']],
+    NIM: [['Air France', 'AF 517', 'CDG', '23:50', '+1 06:20'], ['Air France', 'AF 22', 'DFW', '+1 10:40', '+1 14:05']] };
+  const at = (day, hm) => { const m = /^\+(\d) (.*)$/.exec(hm); return `${plusD(day, m ? +m[1] : 0)}T${m ? m[2] : hm}`; };
+  const plusD = (iso, n) => fmt(addDays(new Date(`${iso}T12:00:00`), n));
+  const SEATS = 'ACDFHK';
+  Object.values(GEN).forEach((G, j) => {
+    const cid = ids[G.name]; const site = db.prepare('SELECT d.airport FROM contractors c JOIN destinations d ON d.id = c.destination_id WHERE c.id = ?').get(cid).airport;
+    const tday = d(0); const ons = db.prepare("SELECT * FROM schedule_blocks WHERE contractor_id = ? AND kind = 'on' ORDER BY start").all(cid);
+    const pastOrNow = ons.filter((b) => b.start <= tday).pop(); const soon = ons.find((b) => b.start > tday && b.start <= d(21));
+    const conf = (n) => `${G.emp.slice(3)}${'QRZXKM'[n % 6]}${String.fromCharCode(65 + (j % 26))}`;
+    const trip = (day, legs, dirn, n, seenOffset) => {
+      dir = dirn; const code = `FF${conf(n)}`;
+      const first = dirn === 'outbound' ? (G.home === 'DFW' ? [] : [['American', `AA ${1100 + (j * 13) % 800}`, 'DFW', '06:15', '08:40']]) : [];
+      const tail = dirn === 'return' && G.home !== 'DFW' ? [['American', `AA ${2100 + (j * 17) % 800}`, G.home, '+1 17:30', '+1 19:45']] : [];
+      let from = dirn === 'outbound' ? G.home : site;
+      [...first, ...legs, ...tail].forEach(([al, no, to, dep, arr], q) => {
+        const seen = seenOffset === null ? null : d(seenOffset);
+        fl.run(cid, al, no, from, to, at(day, dep), at(day, arr), code, `${10 + ((j * 7 + q * 5) % 30)}${SEATS[(j + q) % 6]}`, q === 0 ? (dirn === 'outbound' ? 'Report 3 hours before departure. Passport + visa letter.' : 'End of rotation — turn in site badge.') : '', '-5 days', seen);
+        from = to;
+      });
+    };
+    if (pastOrNow) { trip(pastOrNow.start, ROUTE[site], 'outbound', 1, -6); if (pastOrNow.end <= d(21)) trip(pastOrNow.end, BACK[site], 'return', 2, pastOrNow.end < tday ? -1 : null); }
+    if (soon) trip(soon.start, ROUTE[site], 'outbound', 3, j % 3 ? -1 : null);
+    if (pastOrNow && pastOrNow.end >= tday && j % 2 === 0) { // on site now: a couple of check-ins on the map
+      const C0 = { EBL: [36.237, 43.963], KWI: [28.94, 48.09], JIB: [11.547, 43.155], NIM: [13.48, 2.17] }[site];
+      db.prepare("UPDATE contractors SET tracking_consent = 1, tracking_consent_at = datetime('now', '-10 days') WHERE id = ?").run(cid);
+      ci.run(cid, 'checkin', enc({ lat: C0[0] + (j % 7) * 0.003, lng: C0[1] + (j % 5) * 0.003, acc: 25 }), `-${2 + (j % 9)} hours`);
+    }
+  });
+  dir = 'outbound';
   // AI-generated portraits of fictional people (seed-assets/headshots/<employee #>.jpg) -> encrypted uploads, pre-approved
   const HS = path.join(__dirname, '..', 'seed-assets', 'headshots'); fs.mkdirSync(UP, { recursive: true });
   for (const [n, cid] of Object.entries(ids)) {
@@ -277,6 +354,6 @@ function seed() {
   return { ids };
 }
 
-const SEED_VERSION = '13'; // bump when demo data shape changes; demo servers reseed on boot
+const SEED_VERSION = '14'; // bump when demo data shape changes; demo servers reseed on boot
 module.exports = { syncPasswords, seed, SEED_VERSION };
 if (require.main === module) { seed(); console.log('Seeded.'); }

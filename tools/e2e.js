@@ -50,9 +50,10 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
   // --- Admin ---
   a = await session(...ADMIN, desk);
   await snap(a, '10-admin-dashboard.png');
-  ok('Admin board shows 13 contractors', (await a.textContent('.tile .n')) === '13');
-  ok('Board counts 6 green / 4 yellow / 3 red', (await a.textContent('.tile.green .n')) === '6' && (await a.textContent('.tile.yellow .n')) === '4' && (await a.textContent('.tile.red .n')) === '3');
-  await a.click('.tile.red'); await a.waitForTimeout(400); ok('Red filter shows 3 rows', (await a.$$('#rows tr')).length === 3); await snap(a, '11-admin-filter-red.png');
+  const cnt = await a.evaluate(async () => { const l = (await api('GET', '/api/admin/contractors')).contractors; const n = (s) => String(l.filter((c) => c.status === s).length); return { all: String(l.length), green: n('green'), yellow: n('yellow'), red: n('red') }; });
+  ok('Admin board shows 80 contractors', (await a.textContent('.tile .n')) === '80' && cnt.all === '80');
+  ok(`Board counts ${cnt.green} green / ${cnt.yellow} yellow / ${cnt.red} red`, (await a.textContent('.tile.green .n')) === cnt.green && (await a.textContent('.tile.yellow .n')) === cnt.yellow && (await a.textContent('.tile.red .n')) === cnt.red && +cnt.red >= 3);
+  await a.click('.tile.red'); await a.waitForTimeout(400); ok(`Red filter shows ${cnt.red} rows`, (await a.$$('#rows tr')).length === Math.min(25, +cnt.red)); await snap(a, '11-admin-filter-red.png');
   await a.goto(BASE + '/admin.html#/scenarios'); await a.waitForTimeout(800); await snap(a, '12-admin-demo-scenarios.png', true);
 
   // Flight send screen (Marcus)
@@ -77,7 +78,7 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
   await a.goto(BASE + '/admin.html#/alerts'); await a.waitForTimeout(600);
   await a.selectOption('#alTo', 'red'); await a.selectOption('#alK', 'urgent'); await a.fill('#alT', 'Fix your blockers this week'); await a.fill('#alB', 'You are RED. Open the app to see what to fix.');
   await snap(a, '17-admin-send-alert.png'); await a.click('#alSend'); await a.waitForTimeout(600);
-  ok('Alert to all RED sent', (await a.textContent('.toast')).includes('3 contractors'));
+  ok(`Alert to all RED sent (${cnt.red})`, (await a.textContent('.toast')).includes(`${cnt.red} contractors`));
 
   // Assistant: John blocked, Tyler allowed
   await a.goto(BASE + '/admin.html#/assistant'); await a.waitForTimeout(500);

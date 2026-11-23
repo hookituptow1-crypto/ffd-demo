@@ -26,21 +26,23 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
 
   // ---- Board: titles + avatars + title filter
   ok('Board shows titles', (await a.textContent('#rows')).includes('Crew Chief'));
-  ok('Board shows headshot thumbnails', (await a.$$('#rows img.av')).length === 13);
+  ok('Board shows headshot thumbnails (25 per page)', (await a.$$('#rows img.av')).length === 25);
+  ok('Board paginates 80 crew', (await a.textContent('#pager')).includes('of 80'));
   const photos = await a.evaluate(async () => { const l = (await api('GET', '/api/admin/contractors')).contractors; const out = [];
     for (const c of l) { const r = await fetch(`/api/headshot/${c.id}?approved=1`); out.push([c.name, r.headers.get('content-type'), c.headshot_status]); } return out; });
   ok('Every demo person has an approved JPEG headshot', photos.every((x) => x[1] === 'image/jpeg' && x[2] === 'approved'), photos.filter((x) => x[1] !== 'image/jpeg').map((x) => x[0]).join(', '));
-  await a.click('#rows tr:has-text("David Tran")'); await a.waitForSelector('.pcard'); await a.waitForTimeout(1200);
+  await a.fill('#q', 'David Tran'); await a.waitForTimeout(300); await a.click('#rows tr:has-text("David Tran")'); await a.waitForSelector('.pcard'); await a.waitForTimeout(1200);
   const pc = await a.textContent('.pcard');
   ok('Board click opens profile with photo at top (David)', (await a.$eval('.pphoto', (i) => i.naturalWidth)) >= 256 && pc.includes('Lead') && pc.includes('RT-1013') && pc.includes('SEA'));
   const dv = await a.evaluate(async () => { const l = (await api('GET', '/api/admin/contractors')).contractors; const id = l.find((c) => c.name === 'David Tran').id; return api('GET', `/api/admin/contractors/${id}`); });
   const P = dv.profile; const full = dv.readiness.status === 'green' && P.passport.number && P.visas.length && P.gov_id.number && P.immunizations.length && P.physical.last_exam && P.description.height_ft && P.emergency_contacts.length === 2 && P.personal.phone && P.personal.address.line1 && dv.flights.length >= 5 && dv.schedule.length >= 3 && dv.readiness.items.some((i) => i.is_check && i.status === 'green');
   ok('David is green and fully complete (docs, background check, description, contacts, flights, schedule)', !!full);
   await a.evaluate(() => window.scrollTo(0, 0)); await a.waitForTimeout(300); await snap(a, '29-admin-profile-david.png');
-  await a.goto(BASE + '/admin.html#/'); await a.waitForSelector('#rows tr'); await a.waitForTimeout(600);
+  await a.goto(BASE + '/admin.html#/'); await a.waitForSelector('#rows tr'); await a.waitForTimeout(600); await a.fill('#q', ''); await a.waitForTimeout(400);
   await a.evaluate(() => window.scrollTo(0, 0)); await a.waitForTimeout(300); await snap(a, '28-admin-board-photos.png');
   await a.selectOption('#titleF', { label: 'A&P Mechanic' }); await a.waitForTimeout(300);
-  ok('Title filter narrows board to A&P Mechanics (2)', (await a.$$('#rows tr[data-id]')).length === 2);
+  const apN = await a.evaluate(async () => (await api('GET', '/api/admin/contractors')).contractors.filter((c) => c.title === 'A&P Mechanic').length);
+  ok(`Title filter narrows board to A&P Mechanics (${apN})`, (await a.$$('#rows tr[data-id]')).length === Math.min(25, apN) && apN > 2 && apN < 80);
   await a.selectOption('#titleF', ''); await snap(a, '30-admin-board-titles.png');
 
   // ---- Daily report
@@ -53,7 +55,8 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
   ok('Report: flag changed in last 24h (Marcus QR 450)', rt.includes('Flight change pushed in last 24h (QR 450)'));
   ok('Report: legs with PNR, seat and connections', rt.includes('PNR TKDEMO4') && rt.includes('via ATL, IST') && rt.includes('seat 27H'));
   const tiles = await a.$$eval('.rtiles .n', (e) => e.map((x) => +x.textContent));
-  ok('Report summary counts', tiles[0] === 5 && tiles[1] === 2 && tiles[2] === 6, tiles.join(','));
+  const rsum = await a.evaluate(async () => (await api('GET', '/api/admin/reports/daily?days=9')).summary);
+  ok('Report summary counts match the data', tiles[0] === rsum.departing && tiles[1] === rsum.returning && tiles[2] === rsum.flagged && rsum.departing >= 5, tiles.join(','));
   await snap(a, '31-admin-report.png', true);
   await a.click('.ec-btn'); await a.waitForSelector('.modal'); ok('EC quick view opens', (await a.textContent('.modal')).includes('📱')); await snap(a, '32-admin-report-ec.png'); await a.click('.modal [data-close]');
   const [dl] = await Promise.all([a.waitForEvent('download'), a.click('#rCsv')]); const csv = fs.readFileSync(await dl.path(), 'utf8');
@@ -69,20 +72,25 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
 
   // ---- Schedule
   await a.goto(BASE + '/admin.html#/schedule'); await a.waitForSelector('.gantt'); await a.waitForTimeout(800);
-  ok('Schedule: one row per contractor', (await a.$$('.g-row[data-c]')).length === 13);
-  ok('Schedule: titles on rows', (await a.textContent('.g-names')).includes('Site Manager'));
-  ok('Schedule: training + leave blocks', (await a.$$('.g-blk.k-training')).length >= 3 && (await a.$$('.g-blk.k-leave')).length >= 1);
+  ok('Schedule: 25 rows per page, 80 people', (await a.$$('.g-row[data-c]')).length === 25 && (await a.textContent('.pager')).includes('80 people'));
+  ok('Schedule: titles on rows', /Technician|Mechanic/.test(await a.textContent('.g-names')));
+  const allB = await a.evaluate(async () => (await api('GET', '/api/admin/schedule?per=500')).contractors.flatMap((c) => c.blocks));
+  ok('Schedule: training + leave blocks', allB.filter((b) => b.kind === 'training').length >= 3 && allB.filter((b) => b.kind === 'leave').length >= 1);
+  const erbil = await a.evaluate(async () => (await api('GET', '/api/admin/schedule')).destinations.find((x) => x.name.startsWith('Erbil')).id);
+  const wesId = await a.evaluate(async () => (await api('GET', '/api/admin/contractors')).contractors.find((c) => c.name === 'Wes Calloway').id);
+  await a.goto(BASE + `/admin.html#/schedule?site=${erbil}`); await a.waitForSelector('.gantt'); await a.waitForTimeout(800);
+  ok('Schedule: site filter (Erbil only)', (await a.$$('.g-row[data-c]')).length > 5 && (await a.$$('.g-row[data-c]')).length < 30);
   ok('Schedule: coverage gap at Arifjan', (await a.textContent('#main')).match(/GAP\s*Camp Arifjan/) !== null);
   ok('Schedule: overstaffing at Erbil', (await a.textContent('#main')).match(/OVER\s*Erbil/) !== null);
   ok('Schedule: conflict Sam (RED overlaps rotation)', /Sam Kowalski[\s\S]{0,80}RED readiness overlaps/.test(await a.textContent('#main')));
-  ok('Schedule: conflict blocks outlined', (await a.$$('.g-blk.conflict')).length >= 3);
+  ok('Schedule: conflict blocks outlined', (await a.$$('.g-blk.conflict')).length >= 1);
   await snap(a, '34-admin-schedule.png', true);
   // drag Wes's ON block +3 days
-  const wesRow = await a.$('.g-row[data-c] >> nth=11'); // alphabetical: Wes last
-  const blk = await a.$$eval('.g-row[data-c]', (rows) => { const r = rows[rows.length - 1]; const b = [...r.querySelectorAll('.g-blk.k-on')].find((x) => x.title.includes('2026-11') || x.title.includes('→')); const bb = b.getBoundingClientRect(); return { x: bb.x + 20, y: bb.y + 15, id: b.dataset.b, t: b.title }; });
+  const wesRow = null;
+  const blk = await a.$$eval(`.g-row[data-c="${wesId}"]`, (rows) => { const r = rows[0]; const b = [...r.querySelectorAll('.g-blk.k-on')].find((x) => x.title.includes('2026-11') || x.title.includes('→')); b.scrollIntoView({ block: 'center', inline: 'nearest' }); const bb = b.getBoundingClientRect(); const sc = document.querySelector('#gScroll').getBoundingClientRect(); return { x: Math.max(bb.x, sc.x) + 40, y: bb.y + 15, id: b.dataset.b, t: b.title }; });
   await a.mouse.move(blk.x, blk.y); await a.mouse.down(); await a.mouse.move(blk.x + 25, blk.y, { steps: 5 }); await a.mouse.move(blk.x + 48, blk.y, { steps: 5 }); await a.mouse.up();
   await a.waitForTimeout(1500);
-  const after = await a.evaluate(async (id) => { const d = await api('GET', '/api/admin/schedule'); return d.contractors.flatMap((c) => c.blocks).find((b) => b.id === +id); }, blk.id);
+  const after = await a.evaluate(async (id) => { const d = await api('GET', '/api/admin/schedule?per=500'); return d.contractors.flatMap((c) => c.blocks).find((b) => b.id === +id); }, blk.id);
   ok('Drag moves a rotation (+3 days)', after && blk.t.includes(after.start) === false, `${blk.t} -> ${after && after.start}`);
   const aud = await a.evaluate(async () => (await api('GET', '/api/admin/audit')).log.slice(0, 5).map((l) => l.action).join(','));
   ok('Schedule change audit-logged', aud.includes('schedule_update'));
@@ -91,6 +99,62 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
   // pattern modal
   await a.click('[data-gen] >> nth=0'); await a.waitForSelector('#gOn'); await snap(a, '35-admin-schedule-pattern.png'); await a.click('.modal [data-close]');
   wesRow;
+
+  // ---- Crew & coverage: settings, on-rotation vs target, swing suggestions + one-click assign
+  await a.goto(BASE + '/admin.html#/crew'); await a.waitForSelector('[data-assign]'); await a.waitForTimeout(600);
+  const cw = await a.textContent('#main');
+  ok('Crew page: total crew vs headcount setting (80 / 80)', /80\s*\/\s*80/.test(cw));
+  ok('Crew page: on rotation today vs target 25', /\d+\s*\/\s*25/.test(cw));
+  ok('Crew page: swing pool of 5 listed', (await a.$$('.card .swrow')).length === 5);
+  await snap(a, '45-admin-crew-coverage.png', true);
+  const crew0 = await a.evaluate(async () => api('GET', '/api/admin/crew'));
+  const short = crew0.sites.find((x) => x.name.startsWith('Erbil') && x.next_gap) || crew0.sites.find((x) => x.next_gap);
+  await a.click(`[data-assign="${short.id}"]`); await a.waitForSelector('.modal [data-pick]'); await a.waitForTimeout(500);
+  const sug = await a.evaluate(async (q) => api('GET', `/api/admin/crew/suggest?site=${q.id}&start=${q.next_gap.start}&end=${q.next_gap.end}`), short);
+  ok('Swing suggestions: ready (green) + available first', sug.suggestions[0].status === 'green' && sug.suggestions[0].available);
+  ok('Swing suggestions: red swing person cannot be assigned', (await a.$$('.modal [data-st="red"][disabled]')).length >= 1);
+  await snap(a, '46-admin-assign-swing.png');
+  await a.click('.modal .swrow:first-child [data-pick]'); await a.waitForTimeout(1200);
+  const crew1 = await a.evaluate(async () => api('GET', '/api/admin/crew'));
+  const asg = crew1.swing.find((x) => x.id === sug.suggestions[0].id);
+  ok(`One-click assign swing: ${sug.suggestions[0].name} → ${short.name.split(',')[0]}`, asg && asg.assigned && asg.assigned.site === short.name);
+  const aud2 = await a.evaluate(async () => (await api('GET', '/api/admin/audit')).log.slice(0, 5).map((l) => l.action).join(','));
+  ok('Swing assignment audit-logged', aud2.includes('swing_assigned'));
+  await a.fill('#cwO', '26'); await a.click('#cwSave'); await a.waitForTimeout(800);
+  ok('Crew settings save (target on rotation 26)', (await a.evaluate(async () => (await api('GET', '/api/admin/crew')).settings.on_target)) === 26);
+  await a.fill('#cwO', '25'); await a.click('#cwSave'); await a.waitForTimeout(600);
+  await a.goto(BASE + '/admin.html#/'); await a.waitForSelector('#rows tr'); await a.selectOption('#crewF', 'swing'); await a.waitForTimeout(400);
+  ok('Board: swing filter shows the 5 swing people', (await a.$$('#rows tr[data-id]')).length === 5); await a.selectOption('#crewF', '');
+
+  // ---- Password: forgot link, outbox, reset page, admin temp password + forced change
+  const anonCtx = await b.newContext({ viewport: phone, deviceScaleFactor: 2 }); const fp = await anonCtx.newPage();
+  await fp.goto(BASE + '/'); ok('Login page has "Forgot password?"', await fp.isVisible('#forgot'));
+  await fp.click('#forgot'); await fp.waitForSelector('#em'); await fp.fill('#em', 'luis@ffd.demo'); await fp.click('#f button'); await fp.waitForSelector('text=Check your email');
+  await snap(fp, '47-phone-forgot-password.png');
+  await a.goto(BASE + '/admin.html#/outbox'); await a.waitForSelector('.ob'); await a.waitForTimeout(400);
+  ok('Admin Outbox shows the reset email', (await a.textContent('#main')).includes('luis@ffd.demo'));
+  await snap(a, '48-admin-outbox.png');
+  const link = await a.$eval('.ob a[href*="reset.html#t="]', (x) => x.href);
+  await fp.goto(link); await fp.waitForSelector('#np'); await fp.fill('#np', 'Sahel-Rotation-2027!'); await fp.fill('#np2', 'Sahel-Rotation-2027!'); await fp.waitForTimeout(200);
+  await snap(fp, '49-phone-reset-new-password.png');
+  ok('Reset page hides the token from the address bar', !(fp.url()).includes('#t='));
+  await fp.click('#go'); await fp.waitForSelector('text=Password updated'); ok('Reset via emailed link works (UI)', true);
+  await anonCtx.close();
+  const luisId = await a.evaluate(async () => (await api('GET', '/api/admin/contractors')).contractors.find((c) => c.name === 'Luis Fontaine').id);
+  await a.goto(BASE + `/admin.html#/c/${luisId}/account`); await a.waitForSelector('#tpGo'); await a.waitForTimeout(400);
+  await a.click('#tpGo'); await a.waitForSelector('#tpVal'); const tmp = (await a.textContent('#tpVal')).trim();
+  ok('Admin "Set temporary password" shows it once', tmp.length >= 12);
+  await snap(a, '50-admin-temp-password.png');
+  await a.click('#tpHide'); ok('Temporary password can be hidden', !(await a.isVisible('#tpVal')));
+  const lc = await b.newContext({ viewport: phone, deviceScaleFactor: 2 }); const lp = await lc.newPage();
+  await lp.goto(BASE + '/'); await lp.fill('#email', 'luis@ffd.demo'); await lp.fill('#pw', tmp); await lp.click('form button'); await lp.waitForURL(/reset\.html/); await lp.waitForSelector('#cur');
+  ok('Temp password forces a new password at sign-in', lp.url().includes('#change') || (await lp.textContent('#view')).includes('temporary'));
+  await lp.fill('#cur', tmp); await lp.fill('#np', 'Djibouti-Crew-88!'); await lp.fill('#np2', 'Djibouti-Crew-88!'); await lp.waitForTimeout(200);
+  await snap(lp, '51-phone-forced-change.png');
+  await lp.click('#go'); await lp.waitForURL(/app\.html/); ok('After the forced change the app opens', lp.url().includes('/app.html'));
+  await lc.close();
+  await a.goto(BASE + `/admin.html#/c/${luisId}/account`); await a.waitForSelector('#ulGo'); await a.click('#ulGo'); await a.waitForTimeout(600);
+  ok('Admin "Unlock account" works', (await a.evaluate(async () => (await api('GET', '/api/admin/audit')).log.slice(0, 3).map((l) => l.action).join(','))).includes('account_unlocked'));
 
   // ---- Titles settings
   await a.goto(BASE + '/admin.html#/titles'); await a.waitForSelector('#tNew');

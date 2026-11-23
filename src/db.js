@@ -208,3 +208,14 @@ addCol('contractors', 'headshot_upload_id', 'INTEGER');
 addCol('contractors', 'headshot_status', "TEXT"); // pending | approved | rejected
 addCol('contractors', 'headshot_note', "TEXT DEFAULT ''");
 addCol('contractors', 'headshot_at', 'TEXT');
+// --- passwords: forced change, reset tokens (hash only), demo outbox ---
+addCol('users', 'must_change', 'INTEGER NOT NULL DEFAULT 0');
+addCol('users', 'pw_changed_at', 'TEXT');
+db.exec(`CREATE TABLE IF NOT EXISTS password_resets (
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE,
+  expires_at INTEGER NOT NULL, used_at TEXT, created_by TEXT NOT NULL DEFAULT 'self', created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE INDEX IF NOT EXISTS pr_user ON password_resets(user_id);
+CREATE TABLE IF NOT EXISTS outbox (
+  id INTEGER PRIMARY KEY, to_email TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'notice',
+  status TEXT NOT NULL DEFAULT 'outbox-only', created_at TEXT NOT NULL DEFAULT (datetime('now')));`);
+addCol('contractors', 'swing', 'INTEGER NOT NULL DEFAULT 0');

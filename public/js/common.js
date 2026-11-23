@@ -9,12 +9,14 @@ async function api(method, url, body) {
     body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await r.json().catch(() => ({}));
   if (r.status === 401 && !url.includes('/login')) { location.href = '/'; throw new Error('Sign in required'); }
+  if (r.status === 403 && data.must_change && !location.pathname.startsWith('/reset')) { location.href = '/reset.html#change'; throw new Error(data.error); }
   if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
   return data;
 }
 async function requireRole(role) {
   try { DRS.me = await api('GET', '/api/me'); } catch { return null; }
   DRS.csrf = DRS.me.csrf;
+  if (DRS.me.must_change) { location.href = '/reset.html#change'; return null; }
   if (DRS.me.role !== role) { location.href = DRS.me.role === 'admin' ? '/admin.html' : '/app.html'; return null; }
   return DRS.me;
 }

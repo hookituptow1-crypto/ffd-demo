@@ -1,5 +1,5 @@
 'use strict';
-const A = { list: [], filter: { status: '', q: '', dest: '', title: '' }, dests: null, titles: null };
+const A = { page: 0, list: [], filter: { status: '', q: '', dest: '', title: '', crew: '' }, dests: null, titles: null };
 const main = () => $('#main');
 const CAT = { passport: '🛂 Passport', visa: '📄 Visa', immunization: '💉 Immunization', id: '🪪 ID', clearance: '🩺 Clearance', other: '📌 Other' };
 async function loadDests() { A.dests = await api('GET', '/api/admin/destinations'); return A.dests; }
@@ -17,25 +17,32 @@ async function dash() {
       <button class="tile red ${A.filter.status === 'red' ? 'on' : ''}" data-st="red"><div class="mut small">🔴 NO-GO</div><div class="n">${n('red')}</div></button></div>
     <div class="row mb"><input id="q" placeholder="Search name or employee #" value="${esc(A.filter.q)}" class="grow">
       <select id="dest" class="grow"><option value="">All destinations</option>${A.dests.destinations.map((d) => `<option value="${d.id}" ${String(A.filter.dest) === String(d.id) ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select>
-      <select id="titleF" class="grow">${titleOpts(titles, A.filter.title)}</select></div>
-    <div class="card"><table><thead><tr><th>Status</th><th>Contractor</th><th>Destination</th><th>Deploys</th><th>Issues</th><th>Passport</th><th>DOB</th></tr></thead><tbody id="rows"></tbody></table></div>`;
+      <select id="titleF" class="grow">${titleOpts(titles, A.filter.title)}</select>
+      <select id="crewF" class="grow">${[['', 'All crew'], ['on', 'On rotation now'], ['off', 'Off rotation'], ['swing', 'Swing / fill-in']].map(([v, t]) => `<option value="${v}" ${A.filter.crew === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <div class="card"><table><thead><tr><th>Status</th><th>Contractor</th><th>Destination</th><th>Deploys</th><th>Issues</th><th>Passport</th><th>DOB</th></tr></thead><tbody id="rows"></tbody></table><div class="pager" id="pager"></div></div>`;
   const rows = () => {
     const q = A.filter.q.toLowerCase();
     const list = contractors.filter((c) => (!A.filter.status || c.status === A.filter.status) && (!A.filter.dest || String(c.destination_id) === String(A.filter.dest))
-      && (!A.filter.title || String(c.title_id) === String(A.filter.title)) && (!q || c.name.toLowerCase().includes(q) || c.employee_no.toLowerCase().includes(q)));
+      && (!A.filter.title || String(c.title_id) === String(A.filter.title))
+      && (!A.filter.crew || (A.filter.crew === 'on' ? c.on_now : A.filter.crew === 'off' ? !c.on_now : c.swing)) && (!q || c.name.toLowerCase().includes(q) || c.employee_no.toLowerCase().includes(q)));
     const order = { red: 0, yellow: 1, green: 2 };
     list.sort((a, b) => order[a.status] - order[b.status] || a.days_to_deploy - b.days_to_deploy);
-    $('#rows').innerHTML = list.map((c) => `<tr class="click" data-id="${c.id}"><td>${pill(c.status)}${c.overridden ? '<div class="small mut mt">manual</div>' : ''}</td>
-      <td><div class="nm">${av(c.id)}<div><b>${esc(c.name)}</b>${c.headshot_status === 'pending' ? ' <span class="pill blue">photo to approve</span>' : ''}<div class="small mut">${esc(c.title || '—')} · ${esc(c.employee_no)}${c.unverified ? ` · <span class="pill blue">${c.unverified} to verify</span>` : ''}</div></div></div></td>
-      <td>${esc(c.destination)}<div class="small mut">🛫 ${esc(c.home_airport || '—')}${c.alt_airport ? ` / ${esc(c.alt_airport)}` : ''}</div></td><td>${fdate(c.deploy_date)}<div class="small mut">${c.days_to_deploy > 0 ? `in ${c.days_to_deploy} days` : 'on rotation'}</div></td>
+    const PER = 25; const pages = Math.max(1, Math.ceil(list.length / PER)); if (A.page >= pages) A.page = pages - 1;
+    const shown = list.slice(A.page * PER, A.page * PER + PER);
+    $('#pager').innerHTML = `<span class="small mut">${list.length ? `${A.page * PER + 1}–${A.page * PER + shown.length} of ${list.length}` : ''}</span>${pages > 1 ? `<button class="btn sm" id="pgP" ${A.page ? '' : 'disabled'}>‹ Prev</button><span class="small">Page ${A.page + 1} / ${pages}</span><button class="btn sm" id="pgN" ${A.page < pages - 1 ? '' : 'disabled'}>Next ›</button>` : ''}`;
+    $('#pgP')?.addEventListener('click', () => { A.page--; rows(); window.scrollTo(0, 0); }); $('#pgN')?.addEventListener('click', () => { A.page++; rows(); window.scrollTo(0, 0); });
+    $('#rows').innerHTML = shown.map((c) => `<tr class="click" data-id="${c.id}"><td>${pill(c.status)}${c.overridden ? '<div class="small mut mt">manual</div>' : ''}</td>
+      <td><div class="nm">${av(c.id)}<div><b>${esc(c.name)}</b>${c.swing ? ' <span class="pill blue">SWING</span>' : ''}${c.headshot_status === 'pending' ? ' <span class="pill blue">photo to approve</span>' : ''}<div class="small mut">${esc(c.title || '—')} · ${esc(c.employee_no)}${c.unverified ? ` · <span class="pill blue">${c.unverified} to verify</span>` : ''}</div></div></div></td>
+      <td>${esc(c.destination)}<div class="small mut">🛫 ${esc(c.home_airport || '—')}${c.alt_airport ? ` / ${esc(c.alt_airport)}` : ''}</div></td><td>${fdate(c.deploy_date)}<div class="small mut">${c.on_now ? 'on rotation' : c.days_to_deploy > 0 ? `in ${c.days_to_deploy} days` : c.swing ? 'swing pool' : 'off'}</div></td>
       <td><div class="issues">${c.issues.map((i) => `<span class="pill ${i.status}">${esc(i.name)}</span>`).join('') || '<span class="mut small">None</span>'}</div>${c.fix_by ? `<div class="small mut mt">Fix by ${fdate(c.fix_by)}</div>` : ''}</td>
       <td class="mut">${esc(c.passport_masked) || '—'}</td><td class="mut">${esc(c.dob_masked) || '—'}</td></tr>`).join('') || '<tr><td colspan="7" class="mut center">No matches</td></tr>';
   };
   rows();
-  $$('[data-st]').forEach((b) => b.addEventListener('click', () => { A.filter.status = b.dataset.st; dash(); }));
-  $('#q').addEventListener('input', (e) => { A.filter.q = e.target.value; rows(); });
-  $('#dest').addEventListener('change', (e) => { A.filter.dest = e.target.value; rows(); });
-  $('#titleF').addEventListener('change', (e) => { A.filter.title = e.target.value; rows(); });
+  $$('[data-st]').forEach((b) => b.addEventListener('click', () => { A.filter.status = b.dataset.st; A.page = 0; dash(); }));
+  $('#q').addEventListener('input', (e) => { A.filter.q = e.target.value; A.page = 0; rows(); });
+  $('#dest').addEventListener('change', (e) => { A.filter.dest = e.target.value; A.page = 0; rows(); });
+  $('#titleF').addEventListener('change', (e) => { A.filter.title = e.target.value; A.page = 0; rows(); });
+  $('#crewF').addEventListener('change', (e) => { A.filter.crew = e.target.value; A.page = 0; rows(); });
   $('#rows').addEventListener('click', (e) => { const tr = e.target.closest('tr[data-id]'); if (tr) location.hash = `#/c/${tr.dataset.id}`; });
   $('#newC').addEventListener('click', () => contractorModal());
 }
@@ -46,7 +53,7 @@ async function contractorModal(c = {}) {
     <div class="grid2">
       <div><label>Full name *</label><input id="cName" value="${esc(c.name)}"></div><div><label>Employee # *</label><input id="cEmp" value="${esc(c.employee_no)}"></div>
       <div><label>Phone</label><input id="cPhone" value="${esc(c.phone)}"></div><div><label>Email</label><input id="cEmail" value="${esc(c.email)}"></div>
-      <div><label>Title / role</label><select id="cTitle">${titleOpts(titles, c.title_id, '—')}</select></div><div></div>
+      <div><label>Title / role</label><select id="cTitle">${titleOpts(titles, c.title_id, '—')}</select></div><div><label class="chk"><input type="checkbox" id="cSwing" ${c.swing ? 'checked' : ''}> Swing / fill-in (no fixed rotation; covers gaps)</label></div>
       <div><label>Destination</label><select id="cDest"><option value="">—</option>${ds.map((d) => `<option value="${d.id}" ${d.id === c.destination_id ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select></div>
       <div><label>Home airport</label><input id="cHome" data-airport value="${esc(c.home_airport)}" placeholder="Code or city" autocomplete="off"></div>
       <div><label>Alternate airport</label><input id="cAlt" data-airport value="${esc(c.alt_airport)}" placeholder="Optional" autocomplete="off"></div><div></div>
@@ -61,6 +68,7 @@ async function contractorModal(c = {}) {
       const body = { name: $('#cName', m).value, employee_no: $('#cEmp', m).value, phone: $('#cPhone', m).value, email: $('#cEmail', m).value, destination_id: $('#cDest', m).value || null,
         home_airport: airportVal($('#cHome', m)), alt_airport: airportVal($('#cAlt', m)), deploy_date: $('#cDep', m).value, next_deploy_date: $('#cNext', m).value, rotation_on: +$('#cOn', m).value, rotation_off: +$('#cOff', m).value, notes: $('#cNotes', m).value, title_id: $('#cTitle', m).value || null };
       const r = c.id ? await api('PUT', `/api/admin/contractors/${c.id}`, body) : await api('POST', '/api/admin/contractors', body);
+      if ($('#cSwing', m).checked !== !!c.swing) await api('PUT', `/api/admin/contractors/${c.id || r.id}/swing`, { swing: $('#cSwing', m).checked });
       if (!c.id && $('#aEmail', m).value) await api('PUT', `/api/admin/contractors/${r.id}/account`, { email: $('#aEmail', m).value, password: $('#aPw', m).value });
       A.titles = null; close(); toast('Saved'); location.hash = `#/c/${c.id || r.id}`; route();
     }));
@@ -217,11 +225,50 @@ function subAlerts(d) {
   $('#sub').innerHTML = `<div class="card"><div class="row"><h2>Alerts sent to ${esc(d.contractor.name)}</h2><a class="btn sm right" href="#/alerts?to=${d.contractor.id}">+ New alert</a></div>
     ${d.alerts.map((a) => `<div class="alert-item"><div class="t"><b>${esc(a.title)}</b><span class="pill gray">${esc(a.kind)}</span><span class="right small mut">${a.read_at ? '✓ read' : 'unread'}</span></div><div class="small">${esc(a.body)}</div><div class="small mut">${esc(a.created_at)} UTC</div></div>`).join('') || '<p class="mut small">None.</p>'}</div>`;
 }
-function subAccount(d) {
-  $('#sub').innerHTML = `<div class="card"><h2>App login</h2><p class="small mut">Set or reset the contractor's login. Resetting signs them out everywhere. Passwords are stored as salted scrypt hashes.</p>
-    <div class="grid2"><div><label>Login email</label><input id="acE" value="${esc(d.account_email || d.contractor.email)}"></div><div><label>New temporary password (10+ chars)</label><input id="acP" type="password" autocomplete="new-password"></div></div>
-    <button class="btn pri mt" id="acS">Save login</button></div>`;
-  $('#acS').addEventListener('click', () => guard(async () => { await api('PUT', `/api/admin/contractors/${d.contractor.id}/account`, { email: $('#acE').value, password: $('#acP').value }); toast('Login saved'); }));
+async function subAccount(d) {
+  const cid = d.contractor.id; const a = (await api('GET', `/api/admin/contractors/${cid}/account`)).account;
+  $('#sub').innerHTML = `<div class="grid2 wauto"><div class="card"><h2>App login</h2>
+    ${a ? `<p class="small">Sign-in email <b>${esc(a.email)}</b></p>
+      <p class="small">${a.locked ? '<span class="pill red">LOCKED</span> too many failed sign-ins' : '<span class="pill green">not locked</span>'} · ${a.failures_last_hour} failed in the last hour · ${a.sessions} active session(s)
+      ${a.must_change ? ' · <span class="pill yellow">must change password at next sign-in</span>' : ''}${a.reset_link_pending ? ' · <span class="pill blue">reset link pending</span>' : ''}</p>
+      <p class="small mut">Last sign-in ${a.last_login ? `${esc(a.last_login)} UTC` : '—'} · password last changed ${a.pw_changed_at ? `${esc(a.pw_changed_at)} UTC` : '— (initial)'}</p>`
+    : '<p class="small">No app login yet. Set one below.</p>'}
+    <h3 class="mt">Login email${a ? '' : ' + first password'}</h3>
+    <div class="grid2"><div><label>Login email</label><input id="acE" value="${esc(d.account_email || d.contractor.email)}"></div><div><label>Password (10+ chars)</label><input id="acP" type="password" autocomplete="new-password" placeholder="${a ? 'leave blank to keep' : ''}"></div></div>
+    <button class="btn mt" id="acS">Save login</button></div>
+    ${a ? `<div class="card"><h2>Password &amp; lockout</h2><p class="small mut">Admin only. Each action signs the contractor out everywhere and is written to the audit log.</p>
+    <h3>Set temporary password</h3><p class="small mut">Shown to you once. They must pick their own password at next sign-in.</p>
+    <div class="row"><input id="tpw" type="text" autocomplete="off" spellcheck="false" placeholder="Leave blank to auto-generate (12+ chars, mixed)"><button class="btn pri" id="tpGo">Set temporary password</button></div>
+    <div id="tpOut"></div>
+    <h3 class="mt">Reset by email</h3><div class="row"><button class="btn" id="rlGo">✉️ Send reset link</button><button class="btn" id="frGo">⛔ Force password reset</button></div>
+    <p class="small mut">Force = sign them out now and require a new password before they can use the app.${DRS.me && DRS.me.demo !== false ? ' Demo: emails land in the <a href="#/outbox">Outbox</a>.' : ''}</p>
+    <h3 class="mt">Unlock account</h3><button class="btn" id="ulGo">🔓 Unlock account</button></div>` : ''}</div>`;
+  $('#acS').addEventListener('click', () => guard(async () => {
+    if (a && !$('#acP').value) { toast('Type a password to change the login, or use “Set temporary password”.', true); return; }
+    await api('PUT', `/api/admin/contractors/${cid}/account`, { email: $('#acE').value, password: $('#acP').value }); toast('Login saved'); subAccount(d); }));
+  if (!a) return;
+  $('#tpGo').addEventListener('click', () => guard(async () => {
+    if (!confirm(`Set a temporary password for ${d.contractor.name}? They will be signed out everywhere.`)) return;
+    const r = await api('POST', `/api/admin/contractors/${cid}/password/temp`, { password: $('#tpw').value || undefined }); $('#tpw').value = '';
+    $('#tpOut').innerHTML = `<p class="small mt"><b>Temporary password for ${esc(r.email)}</b> — copy it now, it won't be shown again:</p><div class="onetime" id="tpVal"></div>
+      <div class="row"><button class="btn sm" id="tpCopy">Copy</button><button class="btn sm" id="tpHide">I've saved it — hide</button></div>`;
+    $('#tpVal').textContent = r.password;
+    $('#tpCopy').addEventListener('click', () => navigator.clipboard.writeText(r.password).then(() => toast('Copied')));
+    $('#tpHide').addEventListener('click', () => { $('#tpOut').innerHTML = '<p class="small mut">Temporary password hidden.</p>'; });
+    toast('Temporary password set'); }));
+  const link = (force) => guard(async () => {
+    if (force && !confirm(`Force ${d.contractor.name} to reset their password? They will be signed out now.`)) return;
+    const r = await api('POST', `/api/admin/contractors/${cid}/password/reset-link`, { force }); toast(r.delivered === 'outbox' ? 'Reset link written to the Outbox' : 'Reset link emailed'); setTimeout(() => subAccount(d), 400); });
+  $('#rlGo').addEventListener('click', () => link(false)); $('#frGo').addEventListener('click', () => link(true));
+  $('#ulGo').addEventListener('click', () => guard(async () => { const r = await api('POST', `/api/admin/contractors/${cid}/unlock`); toast(`Unlocked · ${r.sessions_ended} session(s) ended`); subAccount(d); }));
+}
+async function outboxPage() {
+  const r = await api('GET', '/api/admin/outbox');
+  $('#main').innerHTML = `<div class="head"><h1>Outbox</h1></div><div class="card mb"><p class="small mut">${r.enabled ? `Demo mail: no email provider is connected${r.provider ? ` (provider “${esc(r.provider)}” is set — rows also show delivery status)` : ''}, so password-reset and “password changed” emails are written here instead of being sent. Admin only. Reset links work once and expire after 30 minutes.` : 'The Outbox is off (DEMO_MODE=0 and MAIL_OUTBOX unset).'}</p>
+    <button class="btn sm" id="obR">↻ Refresh</button></div>
+    ${r.messages.map((m) => `<div class="card mb ob"><div class="row"><b>${esc(m.subject)}</b><span class="pill gray">${esc(m.kind)}</span><span class="pill ${m.status === 'failed' ? 'red' : 'gray'}">${esc(m.status)}</span><span class="right small mut">${esc(m.created_at)} UTC</span></div>
+      <div class="small">To: ${esc(m.to_email)}</div><div class="ob-body">${esc(m.body).replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')}</div></div>`).join('') || '<p class="mut">No messages yet. Try “Forgot password?” on the sign-in page.</p>'}`;
+  $('#obR').addEventListener('click', () => outboxPage());
 }
 
 // ---------------- Send alert ----------------
@@ -413,6 +460,8 @@ async function route() {
     if (parts[0] === 'report') return reportPage(qs);
     if (parts[0] === 'schedule') return schedulePage(qs);
     if (parts[0] === 'titles') return titlesPage();
+    if (parts[0] === 'outbox') return outboxPage();
+    if (parts[0] === 'crew') return crewPage(qs);
     return dash();
   });
 }
