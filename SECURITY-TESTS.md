@@ -234,6 +234,12 @@ Not tested automatically: the 30-minute expiry (the code checks `expires_at` aga
 - PASS  Mike Brennan flagged overdue
 </details>
 
+## 5. Ticket approval queue + password change (live, commit b847a86, 2026-11-22)
+- Old demo passwords rejected on live (401 for admin and a contractor); new ones accepted (200). New values are only in Render env vars and private files on the box.
+- `tools/e2e-tickets.js` on live: 26/26 — banner + badge in full and compact view, report section (API + page), 8 proposals incl. John Doe at exactly 30 days, First class on the company preferred airline, swap, reject, bulk confirm (RED skipped), "Confirmed by admin → Booking" → "Booked", itinerary email in Outbox, contractor notification + My Schedule itinerary with airline seat/check-in link, RED single confirm needs explicit override (audited), confirm without CSRF token refused (403), contractor blocked from admin ticket routes (403).
+- `tools/sectest.js` now also checks contractor access to `/api/admin/tickets`, `/tickets/summary`, `/travel/settings` and POST `/tickets/confirm` (all 403). Live: 66 PASS + the known SQL-metacharacter row blocked at Render's edge (403, see section 1).
+- Live re-runs after the change: xss 1/1, pw-test 33/33, ops 67/67, main e2e 41/41, phone 34/34.
+
 ## Known limits / follow-ups
 - Demo passwords were changed on 2026-11-22 (new values live only in Render env vars and private files on the box). The old ones are still in git history but no longer work. Purge history before any real data goes in if that matters.
 - In demo mode the admin can read reset links in the Outbox. That is by design for demos; turn it off by connecting a mail provider and setting `DEMO_MODE=0`.
