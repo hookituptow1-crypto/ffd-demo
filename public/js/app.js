@@ -43,12 +43,22 @@ function badges() {
 }
 let HS_V = Date.now();
 async function uploadHeadshot(data) { await api('POST', '/api/my/headshot', { data }); HS_V = Date.now(); toast('📸 Headshot sent — waiting for office approval'); render(); }
+// Approved itinerary (from the office's ticket approval queue). Seat + check-in are done by the traveler on the airline's site.
+function itinCard(it, id = '') {
+  return `<div class="card itin ${it.status}" ${id ? `id="${id}"` : ''}><div class="row"><b class="grow">✈️ Your itinerary — ${esc(it.destination)}</b><span class="pill ${it.status === 'booked' ? 'green' : 'blue'}">${esc(it.status_label)}</span></div>
+    <div class="small mut">Demo · mock booking — no real ticket issued</div>
+    <div class="itin-conf"><span class="small mut">Confirmation</span><b class="mono">${esc(it.confirmation || 'booking…')}</b><span class="pill gold">${esc(it.cabin)}</span></div>
+    ${it.legs.map((l) => `<div class="itin-leg"><b>${esc(l.flight_no)}</b> ${esc(l.from)} → ${esc(l.to)}<div class="small">${fdt(l.depart_at)} → ${fdt(l.arrive_at)} <span class="mut">local</span></div></div>`).join('')}
+    ${it.manage_url ? `<a class="btn pri block mt" href="${esc(it.manage_url)}" target="_blank" rel="noopener noreferrer">💺 Pick your seat / Check in</a>` : ''}
+    <p class="small mt">You choose your own seat and get your boarding pass from ${esc(it.airline)} — use confirmation <b>${esc(it.confirmation || '')}</b> and your last name.</p></div>`;
+}
 async function renderSchedule() {
   const d = await api('GET', '/api/my/schedule'); const KL = { on: 'ON rotation', off: 'OFF — home', travel: 'Travel day', training: 'Training', leave: 'Leave' }; const IC = { on: '🛠️', off: '🏠', travel: '✈️', training: '🎓', leave: '🌴' };
   const fl = Object.fromEntries(d.flights.map((f) => [f.id, f]));
   const fh = (ids) => ids.map((id) => fl[id]).map((f) => `<div class="small">✈️ <b>${esc(f.airline)} ${esc(f.flight_no)}</b> ${esc(f.from_airport)} → ${esc(f.to_airport)} · ${fdt(f.depart_at)} · Conf ${esc(f.confirmation || '—')}</div>`).join('');
   const up = d.blocks.filter((b) => b.end >= d.today);
   $('#view').innerHTML = `<div class="section"><div class="row"><h2>🗓️ My schedule</h2><a class="btn sm right" href="/api/my/schedule.ics" download>📅 Add to calendar (.ics)</a></div>
+    ${(d.itineraries || []).map((it, i) => itinCard(it, i ? '' : 'itin')).join('')}
     <p class="small mut">Pattern ${d.pattern.on} on / ${d.pattern.off} off. Changes from the office show up here and in your alerts.</p>
     ${up.map((b) => `<div class="card mt sched ${b.kind}"><div class="row"><span>${IC[b.kind]}</span><b>${KL[b.kind]}</b>${b.start <= d.today ? '<span class="pill green">Now</span>' : ''}<span class="right small mut">${Math.round((Date.parse(b.end) - Date.parse(b.start)) / 86400000) + 1} days</span></div>
       <div class="val mt">${fdate(b.start)} → ${fdate(b.end)}</div>${b.site ? `<div class="small mut">📍 ${esc(b.site)}</div>` : ''}${b.notes ? `<div class="small">${esc(b.notes)}</div>` : ''}
@@ -67,6 +77,7 @@ function renderStatus() {
   const dtd = r.rotation.days_to_deploy;
   $('#view').innerHTML = `<div class="section">
     ${latest ? `<div class="alert-banner ${latest.kind === 'urgent' ? 'urgent' : ''}" id="banner"><span>${latest.kind === 'flight' ? '✈️' : latest.kind === 'urgent' ? '🚨' : '📣'}</span><div class="grow"><b>${esc(latest.title)}</b><div class="small mut">${esc(latest.body)}</div></div><span class="pill blue">New</span></div>` : ''}
+    ${(S.itineraries || []).length ? (() => { const it = S.itineraries[0]; return `<button class="itin-teaser" id="itinGo"><span>🎫</span><span class="grow"><b>Your trip to ${esc(it.destination.split(',')[0])} is ${it.status === 'booked' ? 'booked' : 'being booked'}</b><span class="small">${esc(it.cabin)} · ${esc(it.legs.map((l) => l.flight_no).join(' + ') || it.airline)} · ${fdate(it.depart_date)}${it.confirmation ? ` · Conf ${esc(it.confirmation)}` : ''}</span></span><span class="small">My Schedule ›</span></button>`; })() : ''}
     <div class="hello mb">Welcome back<b>${esc(S.contractor.name)}</b></div>
     <div class="light ${r.status}" id="light">
       <div class="orb">${ic}</div>
@@ -93,7 +104,8 @@ function renderStatus() {
     ${S.flights.length ? `<div class="card mt" id="nextFlight"><div class="row"><h3>✈️ Next flight</h3>${S.new_flights ? '<span class="pill blue">New</span>' : ''}<button class="btn sm right" data-go="flights">All flights</button></div>
       ${(() => { const f = S.flights.find((x) => x.depart_at.slice(0, 10) >= new Date().toISOString().slice(0, 10)) || S.flights[0]; return `<div class="flight mt"><div class="small mut">${esc(f.airline)} · ${esc(f.flight_no)}</div><div class="route">${esc(f.from_airport)}<span class="line"></span>${esc(f.to_airport)}</div><div class="small">${fdt(f.depart_at)} · Conf <b>${esc(f.confirmation)}</b></div></div>`; })()}</div>` : ''}
   </div>`;
-  $('#banner')?.addEventListener('click', () => go('alerts'));
+  $('#banner')?.addEventListener('click', () => go(/^✈️ Itinerary/.test(latest.title) ? 'schedule' : 'alerts'));
+  $('#itinGo')?.addEventListener('click', () => go('schedule'));
   api('GET', '/api/my/badge').then(async (b) => {
     if (!$('#bcv')) return; b.v = HS_V; await drawBadge($('#bcv'), b);
     $('#bNote').textContent = b.headshot_status === 'pending' ? 'Your new photo is waiting for office approval.' : b.headshot_status === 'rejected' ? `Photo needs a retake${b.headshot_note ? `: ${b.headshot_note}` : ''}.` : b.headshot_status === 'placeholder' ? 'Add a headshot so your badge shows your photo.' : '';

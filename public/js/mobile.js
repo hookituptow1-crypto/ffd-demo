@@ -17,10 +17,12 @@ const MOB = {
   top.innerHTML = '<img src="/icons/logo.png" alt=""><b data-brand="short">FFD</b><span class="mut small">Admin</span><span class="grow"></span>';
   const tg = document.createElement('button'); tg.id = 'viewToggle'; tg.className = 'btn sm'; tg.type = 'button';
   tg.addEventListener('click', () => MOB.set(MOB.on() ? 'full' : 'compact'));
+  const tk = document.createElement('a'); tk.id = 'mTk'; tk.href = '#/tickets'; tk.className = 'btn sm'; tk.setAttribute('aria-label', 'Tickets to approve');
+  tk.innerHTML = '🎫 <span class="badge tkN hidden"></span>'; top.appendChild(tk);
   top.appendChild(tg); document.body.prepend(top);
   const tabs = document.createElement('nav'); tabs.id = 'mTabs';
   tabs.innerHTML = [['#/', 'dash', '🚦', 'Board'], ['#/schedule', 'schedule', '🗓️', 'Schedule'], ['#/report', 'report', '📋', 'Report'], ['#/map', 'map', '🗺️', 'Map'], ['#more', 'more', '☰', 'More']]
-    .map(([h, n, i, t]) => `<a href="${h}" data-mtab="${n}"><span>${i}</span>${t}</a>`).join('');
+    .map(([h, n, i, t]) => `<a href="${h}" data-mtab="${n}"><span>${i}</span>${t}${n === 'more' ? '<i class="badge tkN hidden"></i>' : ''}</a>`).join('');
   document.body.appendChild(tabs);
   tabs.querySelector('[data-mtab="more"]').addEventListener('click', (e) => { e.preventDefault();
     const links = [...$$('.side a[href^="#/"]')].filter((a) => !['#/', '#/schedule', '#/report', '#/map'].includes(a.getAttribute('href')));
@@ -108,7 +110,8 @@ async function mReport() {
   const r = await api('GET', '/api/admin/reports/daily?days=9'); const s = r.summary;
   const byDay = {}; r.rows.forEach((x) => (byDay[x.date] = byDay[x.date] || []).push(x));
   main().innerHTML = `<div class="m-head"><h1>Deployment report</h1><span class="mut">${fdate(r.from)} → ${fdate(r.to)}</span></div>
-    <div class="chips"><span class="chip">🛫 ${s.departing} departing</span><span class="chip">🏠 ${s.returning} returning</span><span class="chip red">⚑ ${s.flagged} flagged</span></div>
+    ${typeof tkReportCard === 'function' ? tkReportCard(r) : ''}
+    <div class="chips mt"><span class="chip">🛫 ${s.departing} departing</span><span class="chip">🏠 ${s.returning} returning</span><span class="chip red">⚑ ${s.flagged} flagged</span></div>
     ${Object.entries(byDay).map(([day, rows]) => `<h3 class="m-day">${fdate(day)}</h3>${rows.map((x) => `<div class="card mrep ${x.status}"><div class="row">${av(x.contractor.id)}<div><b>${esc(x.contractor.name)}</b><div class="small">${x.direction === 'outbound' ? '🛫 to' : '🏠 home from'} ${esc((x.destination || '').split(',')[0])} · ${esc(x.contractor.title || '')}</div></div>${dot(x.status)}</div>
       ${x.legs.length ? x.legs.map((l) => `<div class="m-leg"><b>${esc(l.flight_no)}</b> ${esc(l.from)} → ${esc(l.to)} <span class="mut">${esc(l.depart_local.slice(11))} → ${esc(l.arrive_local.slice(11))}</span>${l.seat ? ` · ${esc(l.seat)}` : ''}</div>`).join('') : '<div class="m-leg red-t">No flight booked</div>'}
       ${x.flags.length ? `<div class="mc-iss">${x.flags.map((f) => `<span class="pill ${f.code === 'status_yellow' ? 'yellow' : 'red'}">${esc(f.label)}</span>`).join('')}</div>` : ''}

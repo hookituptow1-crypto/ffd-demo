@@ -219,3 +219,4 @@ CREATE TABLE IF NOT EXISTS outbox (
   id INTEGER PRIMARY KEY, to_email TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'notice',
   status TEXT NOT NULL DEFAULT 'outbox-only', created_at TEXT NOT NULL DEFAULT (datetime('now')));`);
 addCol('contractors', 'swing', 'INTEGER NOT NULL DEFAULT 0');
+addCol('flights', 'cabin', "TEXT DEFAULT ''"); // First / Business / ... (approved tickets)

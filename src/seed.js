@@ -33,6 +33,7 @@ function seed() {
   // remove encrypted files of the uploads we're about to drop (keeps the disk from filling up across nightly resets)
   const UP = path.join(__dirname, '..', 'data', 'uploads');
   for (const u of db.prepare('SELECT file FROM uploads').all()) { try { fs.unlinkSync(path.join(UP, u.file)); } catch {} }
+  try { db.exec('DELETE FROM tickets'); } catch {} // ticket approval queue (table created by tickets.js)
   db.exec(`DELETE FROM sessions; DELETE FROM outbox; DELETE FROM password_resets; DELETE FROM push_subs; DELETE FROM schedule_blocks; DELETE FROM checkins; DELETE FROM admin_alerts; DELETE FROM alerts; DELETE FROM uploads; DELETE FROM flights;
     DELETE FROM blockers; DELETE FROM documents; DELETE FROM profiles; DELETE FROM users; DELETE FROM contractors;
     DELETE FROM destination_requirements; DELETE FROM destinations; DELETE FROM requirement_types;`); // audit_log is kept across resets
@@ -95,7 +96,7 @@ function seed() {
     ['Cody Ramirez', 'RT-1004', 'B · Yellow — passport expires before next rotation (departs in 3 days)', 'Erbil, Iraq', 3, { 'Passport': 300 }, null, null, 'MEM', 'BNA'],
     ['Brianna Holt', 'RT-1005', 'Yellow — typhoid shot lapses before next rotation (departs today)', 'Camp Arifjan, Kuwait', 0, { 'Typhoid': 120 }, null, null, 'DEN', 'COS'],
     ['Wes Calloway', 'RT-1006', 'Yellow — annual medical lapses; rotation in 6 days, no flight booked yet', 'Erbil, Iraq', 6, { 'Medical Fitness Clearance': 130 }, null, null, 'SAT', 'AUS'],
-    ['John Doe', 'RT-1007', 'D · Red — missing yellow fever shot (live fix demo)', 'Camp Lemonnier, Djibouti', 32, { 'Yellow Fever Vaccine': 'missing' }, null, null, 'MEM', 'LIT'],
+    ['John Doe', 'RT-1007', 'D · Red — missing yellow fever shot (live fix demo)', 'Camp Lemonnier, Djibouti', 30, { 'Yellow Fever Vaccine': 'missing' }, null, null, 'MEM', 'LIT'],
     ['Sam Kowalski', 'RT-1008', 'C · Red — expired passport + missing Iraq visa (booked to fly in 4 days!)', 'Erbil, Iraq', 4, { 'Passport': -10, 'Iraq Work Visa': 'missing' }, null, null, 'MSY', 'BTR'],
     ['Trent Vaughn', 'RT-1009', 'Red — background check in progress + HR hold', 'Camp Arifjan, Kuwait', 25, { 'Background Check': 'in_progress' }, 'red', 'Pending background re-investigation', 'OKC', 'TUL'],
     ['Ray Castillo', 'RT-1010', 'Green — deployed now (Erbil), checking in', 'Erbil, Iraq', -25, {}, null, null, 'ELP', 'ABQ'],
@@ -293,7 +294,7 @@ function seed() {
   Object.values(GEN).forEach((G, j) => {
     const cid = ids[G.name]; const site = db.prepare('SELECT d.airport FROM contractors c JOIN destinations d ON d.id = c.destination_id WHERE c.id = ?').get(cid).airport;
     const tday = d(0); const ons = db.prepare("SELECT * FROM schedule_blocks WHERE contractor_id = ? AND kind = 'on' ORDER BY start").all(cid);
-    const pastOrNow = ons.filter((b) => b.start <= tday).pop(); const soon = ons.find((b) => b.start > tday && b.start <= d(21));
+    const pastOrNow = ons.filter((b) => b.start <= tday).pop(); const soon = ons.find((b) => b.start > tday && b.start <= d(5)); // 6-30 days out are left for the ticket approval queue
     const conf = (n) => `${G.emp.slice(3)}${'QRZXKM'[n % 6]}${String.fromCharCode(65 + (j % 26))}`;
     const trip = (day, legs, dirn, n, seenOffset) => {
       dir = dirn; const code = `FF${conf(n)}`;
@@ -354,6 +355,6 @@ function seed() {
   return { ids };
 }
 
-const SEED_VERSION = '14'; // bump when demo data shape changes; demo servers reseed on boot
+const SEED_VERSION = '15'; // bump when demo data shape changes; demo servers reseed on boot
 module.exports = { syncPasswords, seed, SEED_VERSION };
 if (require.main === module) { seed(); console.log('Seeded.'); }

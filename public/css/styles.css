@@ -191,3 +191,28 @@ body.compact .modal{font-size:16px}
 body.compact .tiles{grid-template-columns:1fr 1fr}
 body.compact .grid2{grid-template-columns:1fr}
 @media(max-width:800px){body:not(.compact) #mTop{position:static;justify-content:flex-end;padding:8px 12px 0}}
+/* ---------- tickets to approve ---------- */
+.hidden{display:none!important}
+.pill.gold{color:#f3d27a;border-color:#7a6220;background:#2a2208}.pill.blue{color:#8cc4ff;border-color:#24507a;background:#0d1d2e}
+.tk-bar{display:flex;align-items:center;gap:12px;background:linear-gradient(90deg,#2a2208,#1a1a0c);border:1px solid #7a6220;border-radius:12px;padding:12px 14px;margin:0 0 14px;color:#f6e7b8;text-decoration:none}
+.tk-bar .tk-ic{font-size:24px}.tk-bar b{color:#fff4d0}.tk-bar.static{margin-top:6px}
+.tk-tabs{gap:8px;margin:10px 0}.tk-tools{gap:12px;align-items:center;margin:6px 0 12px}.tk-all{gap:6px;cursor:pointer}
+.tk{margin-bottom:12px;border-left:5px solid #2d3522}.tk.red{border-left-color:#e5484d}.tk.yellow{border-left-color:#f5b82e}.tk.green{border-left-color:#3fb950}.tk.picked{outline:2px solid var(--accent)}
+.tk-top{display:flex;gap:12px;align-items:flex-start}.tk-top .av.lg{width:52px;height:52px;border-radius:10px;flex:none}.tk-cb{width:22px;height:22px;margin-top:14px;flex:none;accent-color:var(--accent)}
+.tk-name{font-weight:700;font-size:17px;color:var(--text);text-decoration:none}.tk-st{white-space:nowrap}
+.tk-trip{margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line)}.tk-route{font-size:16px;margin-bottom:6px}.tk-trip .row{gap:8px;align-items:center}
+.tk-price{margin-left:auto;font-size:20px;font-weight:800;color:#fff}.tk-act{gap:8px;margin-top:12px}.tk-act .btn{min-height:42px}
+.tk-opts{max-height:60vh;overflow:auto}.tk-opt{display:flex;gap:10px;align-items:center;cursor:pointer}.tk-opt input{width:20px;height:20px}
+.tk-set summary{cursor:pointer}.note{background:#151910;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:14px}
+.tk-rep-list{margin-top:8px}.tk-rep-row{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;padding:8px 0;border-top:1px solid var(--line)}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;letter-spacing:.08em}
+#mTk{position:relative;margin-right:4px}#mTk .badge{position:absolute;top:-6px;right:-8px}
+#mTabs a{position:relative}#mTabs a .badge{position:absolute;top:4px;left:58%;font-style:normal}
+body.compact .tk-trip .row span:not(.pill){font-size:15px}body.compact .tk-price{margin-left:0;width:100%}body.compact .tk-act .btn{flex:1}
+/* contractor itinerary */
+.itin{border:1px solid #2c5a8a;background:linear-gradient(180deg,#0d1d2e,#0b1420)}.itin-conf{display:flex;align-items:center;gap:10px;margin:10px 0}.itin-conf b{font-size:24px;color:#fff}
+.itin-leg{padding:8px 0;border-top:1px solid #1d3f63;font-size:16px}
+.itin-teaser{display:flex;width:100%;gap:10px;align-items:center;text-align:left;background:#0d1d2e;border:1px solid #2c5a8a;border-radius:12px;padding:12px;margin-bottom:14px;color:#e8f2ff;font:inherit;cursor:pointer}
+.itin-teaser>span:first-child{font-size:24px}.itin-teaser .grow{display:flex;flex-direction:column;gap:2px}
+.tk-all{white-space:nowrap}
+@media(max-width:640px){.tk-top{flex-wrap:wrap}.tk-top .grow{min-width:0;flex:1 1 150px}.tk-st{order:9;margin-left:34px}.tk-name{font-size:18px}}

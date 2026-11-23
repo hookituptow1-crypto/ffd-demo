@@ -50,8 +50,9 @@ async function login(email, pw) { const j = jar(); const r = await req(j, 'POST'
   ok('Auth', 'Logout invalidates the session server-side (old cookie rejected)', after.s === 401);
   // ---------- access control
   ok('Setup', 'Admin + contractor logins work', cody.status === 200 && admin.status === 200);
-  for (const p of ['/api/admin/contractors', '/api/admin/contractors/1', '/api/admin/tracking', '/api/admin/audit', '/api/admin/reports/daily', '/api/admin/schedule', '/api/admin/titles', '/api/admin/outbox', '/api/admin/crew', '/api/admin/contractors/1/account'])
+  for (const p of ['/api/admin/contractors', '/api/admin/contractors/1', '/api/admin/tracking', '/api/admin/audit', '/api/admin/reports/daily', '/api/admin/schedule', '/api/admin/titles', '/api/admin/outbox', '/api/admin/tickets', '/api/admin/tickets/summary', '/api/admin/travel/settings', '/api/admin/crew', '/api/admin/contractors/1/account'])
     ok('Access control', `Contractor blocked from ${p}`, (await req(cody, 'GET', p)).s === 403);
+  ok('Access control', 'Contractor cannot confirm tickets (POST /api/admin/tickets/confirm)', (await req(cody, 'POST', '/api/admin/tickets/confirm', { ids: [1] }, { Origin: ORIGIN })).s === 403);
   const cl = (await req(admin, 'GET', '/api/admin/contractors')).json.contractors; const codyId = cl.find((c) => c.name === 'Cody Ramirez').id; const other = cl.find((c) => c.name === 'Ray Castillo').id;
   const ups = (await req(admin, 'GET', `/api/admin/contractors/${other}`)).json.uploads;
   // give Ray an upload so there is something to try to steal

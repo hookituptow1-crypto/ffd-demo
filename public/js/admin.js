@@ -334,8 +334,8 @@ function planHtml(p, idx) {
     <div class="mt"><b class="small">Readiness check for ${esc(p.destination.country)}</b>${r.items.map((i) => `<div class="row small"><span class="dot ${i.status}"></span><span>${esc(i.name)}</span><span class="mut">— ${esc(i.message)}</span></div>`).join('')}
     ${r.blockers.map((b) => `<div class="row small"><span class="dot red"></span>${esc(b.description)}</div>`).join('')}</div>
     <div class="mt small"><b>Proposed trip:</b> 🛫 ${esc(airportLabel(p.contractor.home_airport))}${p.contractor.alt_airport ? ` (alt ${esc(p.contractor.alt_airport)})` : ''} → ${esc(p.destination.airport)} · depart ${fdate(p.depart_date)} · return ~${fdate(p.return_date)} (${r.rotation.on}-day rotation)</div>
-    <div class="mt"><b class="small">Fare options (DEMO data, ranked by price)</b>${p.fares.map((f, i) => `<div class="fare ${i === 0 ? 'best' : ''}"><div class="price">$${f.price_usd.toLocaleString()}</div>
-      <div><b>${esc(f.airline)}</b>${i === 0 ? ' <span class="pill green">Cheapest</span>' : ''}<div class="small mut"><b>${esc(f.origin)}</b>${f.origin !== p.contractor.home_airport ? ' (alternate)' : ' (home)'} → ${esc(p.destination.airport)} · ${f.legs.map((l) => esc(l.flight_no)).join(' + ')} · via ${esc(f.via)} · ${f.duration_h}h · ${f.refundable ? 'refundable' : 'non-refundable'}</div><div class="small mut">Departs ${fdt(f.depart_at)} · arrives ${fdt(f.arrive_at)}</div></div>
+    <div class="mt"><b class="small">Fare options (DEMO data) — long-haul defaults to ${esc((p.policy && p.policy.default_cabin) === 'first' ? 'First' : (p.policy && p.policy.default_cabin) || 'First')} class, company preferred airline first, then by price</b>${p.fares.map((f, i) => `<div class="fare ${i === 0 ? 'best' : ''}"><div class="price">$${f.price_usd.toLocaleString()}</div>
+      <div><b>${esc(f.airline)}</b> <span class="pill ${f.cabin === 'first' ? 'gold' : 'blue'}">${esc(f.cabin_label || 'Economy')}</span>${f.preferred ? ' <span class="pill green">★ Company preferred</span>' : ''}${i === 0 ? ' <span class="pill green">Recommended</span>' : ''}${f.cabin_note ? ` <span class="small mut">${esc(f.cabin_note)}</span>` : ''}<div class="small mut"><b>${esc(f.origin)}</b>${f.origin !== p.contractor.home_airport ? ' (alternate)' : ' (home)'} → ${esc(p.destination.airport)} · ${f.legs.map((l) => esc(l.flight_no)).join(' + ')} · via ${esc(f.via)} · ${f.duration_h}h · ${f.refundable ? 'refundable' : 'non-refundable'}</div><div class="small mut">Departs ${fdt(f.depart_at)} · arrives ${fdt(f.arrive_at)}</div></div>
       <div></div>${p.can_book ? `<button class="btn ${i === 0 ? 'pri' : ''} sm" data-book="${esc(f.id)}" data-idx="${idx}">Approve & book</button>` : '<button class="btn sm" disabled title="Contractor is RED">Blocked</button>'}</div>`).join('')}</div>`;
 }
 
@@ -448,7 +448,7 @@ async function route() {
   const h = location.hash.slice(1) || '/'; const [p, qs] = h.split('?'); const parts = p.split('/').filter(Boolean);
   const nav = parts[0] === 'c' ? 'dash' : parts[0] || 'dash';
   $$('[data-nav]').forEach((a) => a.classList.toggle('on', a.dataset.nav === nav));
-  sosPoll();
+  sosPoll(); if (typeof tkBar === 'function') tkBar();
   await guard(async () => {
     if (parts[0] === 'c') return detail(+parts[1], parts[2] || 'readiness');
     if (parts[0] === 'scenarios') return scenarios();
@@ -457,6 +457,7 @@ async function route() {
     if (parts[0] === 'destinations') return destinations();
     if (parts[0] === 'audit') return audit();
     if (parts[0] === 'map') return mapPage();
+    if (parts[0] === 'tickets') return ticketsPage();
     if (parts[0] === 'report') return reportPage(qs);
     if (parts[0] === 'schedule') return schedulePage(qs);
     if (parts[0] === 'titles') return titlesPage();

@@ -44,25 +44,65 @@ function parseDate(text) {
 // Deterministic mock fares so screenshots/demo are stable.
 const CARRIERS = [
   ['Qatar Airways', 'QR', 'DOH'], ['Emirates', 'EK', 'DXB'], ['Turkish Airlines', 'TK', 'IST'],
-  ['Lufthansa', 'LH', 'FRA'], ['United + Ethiopian', 'UA/ET', 'ADD'], ['Delta + KLM', 'DL/KL', 'AMS'],
+  ['Lufthansa', 'LH', 'FRA'], ['United + Ethiopian', 'UA/ET', 'ADD'], ['Delta + KLM', 'DL/KL', 'AMS'], ['Air France', 'AF', 'CDG'],
 ];
-function searchFares(from, to, departDate) {
+const OP = { QR: 'Qatar Airways', EK: 'Emirates', TK: 'Turkish Airlines', LH: 'Lufthansa', UA: 'United', ET: 'Ethiopian Airlines', DL: 'Delta', KL: 'KLM', AF: 'Air France' };
+const FIRST_SOLD = new Set(['EK', 'LH', 'AF', 'QR']); // carriers that sell a First cabin on these long-haul routes (mock)
+// Real "manage trip" pages, where the traveler picks a seat and checks in with the confirmation code + last name
+const MANAGE = { QR: 'https://www.qatarairways.com/en/manage-booking.html', EK: 'https://www.emirates.com/us/english/manage-booking/',
+  TK: 'https://www.turkishairlines.com/en-us/flights/manage-booking/', LH: 'https://www.lufthansa.com/us/en/my-bookings', UA: 'https://www.united.com/en/us/manageres/mytrips',
+  ET: 'https://www.ethiopianairlines.com/us/book/manage-booking', DL: 'https://www.delta.com/my-trips/search', KL: 'https://www.klm.us/trip', AF: 'https://wwws.airfrance.us/trip',
+  AA: 'https://www.aa.com/reservation/view/find-your-trip', FZ: 'https://www.flydubai.com/en/plan/manage-booking' };
+const manageUrl = (flightNo) => MANAGE[String(flightNo || '').split(' ')[0]] || null;
+const CABINS = { first: 'First', business: 'Business', premium: 'Premium Economy', economy: 'Economy' };
+const US = new Set(['IAH', 'HOU', 'DFW', 'DAL', 'ATL', 'MEM', 'BNA', 'DEN', 'COS', 'SAT', 'AUS', 'LIT', 'MSY', 'BTR', 'OKC', 'TUL', 'ELP', 'ABQ', 'JAX', 'SAV', 'TUS', 'PHX', 'SEA', 'PDX',
+  'ORD', 'LAX', 'SFO', 'JFK', 'EWR', 'IAD', 'DCA', 'BOS', 'MIA', 'MCO', 'TPA', 'CLT', 'PHL', 'DTW', 'MSP', 'SLC', 'LAS', 'SAN', 'STL', 'MCI', 'IND', 'CVG', 'CMH', 'PIT', 'RDU', 'BHM', 'JAN', 'SHV', 'LBB', 'MAF', 'AMA', 'CRP', 'HRL', 'MFE', 'BRO', 'GPT', 'PNS', 'MOB', 'HSV', 'TYS', 'CHA', 'GSP', 'RIC', 'ORF', 'BWI', 'SDF', 'LEX', 'OMA']);
+// Company preferred airline (one carrier the company picks). Proposals and the assistant default to it, in the policy cabin.
+const AIRLINES = CARRIERS.map(([name, code, hub]) => ({ code: code.split('/')[0], name, hub, first: FIRST_SOLD.has(code.split('/')[0]) }));
+function policy() {
+  const cabin = db.meta.get('default_cabin') || 'first'; const pref = db.meta.get('preferred_airline') || 'QR';
+  return { default_cabin: CABINS[cabin] ? cabin : 'first', longhaul_hours: Number(db.meta.get('longhaul_hours') || 6),
+    preferred_airline: AIRLINES.some((a) => a.code === pref) ? pref : '', airlines: AIRLINES };
+}
+// Long-haul = leaves the US (overseas) or more than `longhaul_hours` in the air -> default cabin from the travel policy.
+function cabinFor(from, to, hours, pol = policy()) {
+  const longhaul = (US.has(from) !== US.has(to)) || hours > pol.longhaul_hours;
+  return { longhaul, cabin: longhaul ? pol.default_cabin : 'economy' };
+}
+const MULT = { economy: 1, premium: 1.7, business: 3.4, first: 5.6 };
+// opts.cabins = ['first','business'] returns one fare per carrier per cabin (for the approval queue's swap list).
+function searchFares(from, to, departDate, opts = {}) {
   let seed = [...`${from}${to}${departDate}`].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
   const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 2 ** 32);
-  return CARRIERS.map(([airline, code, hub]) => {
-    const price = Math.round(780 + rnd() * 1400);
+  const pol = policy(); const out = [];
+  CARRIERS.forEach(([airline, code, hub]) => {
+    const base = Math.round(780 + rnd() * 1400);
     const hours = Math.round(17 + rnd() * 14);
     const depH = 6 + Math.floor(rnd() * 15);
     const n1 = 100 + Math.floor(rnd() * 800), n2 = 100 + Math.floor(rnd() * 800);
     const c1 = code.split('/')[0], c2 = (code.split('/')[1] || c1);
     const dep = `${departDate}T${String(depH).padStart(2, '0')}:${rnd() > 0.5 ? '30' : '05'}`;
     const arr = new Date(new Date(dep + ':00Z').getTime() + hours * 3600000).toISOString().slice(0, 16);
-    return { id: `${from}-${code}`, origin: from, airline, price_usd: price, duration_h: hours, stops: 1, via: hub, refundable: rnd() > 0.6,
-      legs: [
-        { airline, flight_no: `${c1} ${n1}`, from_airport: from, to_airport: hub, depart_at: dep },
-        { airline, flight_no: `${c2} ${n2}`, from_airport: hub, to_airport: to, arrive_at: arr },
-      ], depart_at: dep, arrive_at: arr, demo: true };
-  }).sort((a, b) => a.price_usd - b.price_usd);
+    const refundable = rnd() > 0.6;
+    const want = cabinFor(from, to, hours, pol);
+    const cabins = opts.cabins || [want.cabin];
+    for (const askCabin of cabins) {
+      let cabin = askCabin; let note = '';
+      if (cabin === 'first' && !FIRST_SOLD.has(c1)) { cabin = 'business'; note = 'First not sold on this route — Business'; if (opts.cabins && opts.cabins.includes('business')) continue; }
+      out.push({ id: `${from}-${code}-${cabin}`, origin: from, airline, carrier: c1, preferred: c1 === pol.preferred_airline, cabin, cabin_label: CABINS[cabin], cabin_note: note, longhaul: want.longhaul,
+        price_usd: Math.round(base * MULT[cabin] / 10) * 10 - 1, duration_h: hours, stops: 1, via: hub, refundable,
+        legs: [
+          { airline: OP[c1] || airline, flight_no: `${c1} ${n1}`, from_airport: from, to_airport: hub, depart_at: dep },
+          { airline: OP[c2] || airline, flight_no: `${c2} ${n2}`, from_airport: hub, to_airport: to, arrive_at: arr },
+        ], depart_at: dep, arrive_at: arr, manage_url: MANAGE[c1] || null, demo: true });
+    }
+  });
+  // Policy cabin first, then cheapest. "Sensible" = skip itineraries more than 8 h longer than the quickest one.
+  const fastest = Math.min(...out.map((f) => f.duration_h));
+  const rank = { business: 1, first: 2, premium: 3, economy: 4, [pol.default_cabin]: 0 };
+  // Order: company preferred airline in the policy cabin, then the policy cabin by price, then the rest.
+  return out.map((f) => ({ ...f, sensible: f.duration_h <= fastest + 8 }))
+    .sort((a, b) => (rank[a.cabin] - rank[b.cabin]) || (b.preferred - a.preferred) || (b.sensible - a.sensible) || (a.price_usd - b.price_usd));
 }
 
 function plan(text) {
@@ -101,7 +141,8 @@ function plan(text) {
   if (!contractor.home_airport) notes.push('No home airport on file — searched from IAH. Add one in their profile.');
   let fares = searchFares(from, dest.airport || 'XXX', depart);
   if (contractor.alt_airport && contractor.alt_airport !== from) {
-    fares = fares.concat(searchFares(contractor.alt_airport, dest.airport || 'XXX', depart).slice(0, 3)).sort((a, b) => a.price_usd - b.price_usd);
+    const rank = (f) => (f.cabin === policy().default_cabin ? 0 : 1);
+    fares = fares.concat(searchFares(contractor.alt_airport, dest.airport || 'XXX', depart).slice(0, 3)).sort((a, b) => (rank(a) - rank(b)) || (b.preferred - a.preferred) || (a.price_usd - b.price_usd));
     notes.push(`Searched home airport ${from} plus alternate ${contractor.alt_airport}.`);
   }
   const issues = readiness.items.filter((i) => i.status !== 'green');
@@ -114,8 +155,9 @@ function plan(text) {
       ? `${contractor.name} is NOT cleared for ${dest.name}: ${issues.filter((i) => i.status === 'red').map((i) => i.name).join(', ')}${readiness.blockers.length ? ' + active blockers' : ''}. Fix before booking (you can still hold a fare).`
       : readiness.status === 'yellow'
         ? `${contractor.name} can go to ${dest.name} on ${depart}, but ${issues.map((i) => i.name).join(', ')} must be renewed before the following rotation.`
-        : `${contractor.name} is cleared for ${dest.name}. Cheapest demo fare: $${fares[0].price_usd} on ${fares[0].airline}.`,
+        : `${contractor.name} is cleared for ${dest.name}. ${fares[0].preferred ? 'Company preferred airline' : 'Best'} ${fares[0].cabin_label} demo fare: $${fares[0].price_usd.toLocaleString()} on ${fares[0].airline}.`,
+    policy: policy(),
   };
 }
 
-module.exports = { plan, searchFares };
+module.exports = { plan, searchFares, policy, AIRLINES, cabinFor, manageUrl, CABINS, MANAGE };

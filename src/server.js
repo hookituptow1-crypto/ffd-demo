@@ -10,20 +10,22 @@ const { evaluate } = require('./status');
 const assistant = require('./assistant');
 const { seed, SEED_VERSION, syncPasswords } = require('./seed');
 const SEC = require('./security');
+const TK = require('./tickets');
 
 const PORT = Number(process.env.PORT || 4300);
 const DEMO_MODE = process.env.DEMO_MODE !== '0';
 const SESSION_HOURS = 12;
 const UPLOAD_DIR = path.join(__dirname, '..', 'data', 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+let SEEDED_NOW = false;
 if (!db.prepare('SELECT COUNT(*) n FROM users').get().n || (DEMO_MODE && db.meta.get('seed_version') !== SEED_VERSION)) {
   for (const f of fs.readdirSync(UPLOAD_DIR)) fs.unlinkSync(path.join(UPLOAD_DIR, f));
-  seed(); console.log(`Seeded demo data v${SEED_VERSION}`);
+  seed(); console.log(`Seeded demo data v${SEED_VERSION}`); SEEDED_NOW = true;
 }
 if (DEMO_MODE) { const n = syncPasswords(); if (n) console.log(`Demo account passwords updated from env (${n} accounts)`); }
 function resetDemo(reason) {
   for (const f of fs.readdirSync(UPLOAD_DIR)) fs.unlinkSync(path.join(UPLOAD_DIR, f));
-  seed();
+  seed(); TK.seedDemo();
   db.prepare("INSERT INTO audit_log (user_id, action, details, ip) VALUES (NULL, 'demo_reseed', ?, '')").run(reason);
   console.log(`Demo reseeded: ${reason}`);
 }
@@ -178,6 +180,10 @@ app.post('/api/logout', need(), (req, res) => {
 // --------------- passwords: forgot / reset / change (+ admin overrides further down) ---------------
 const MAIL = require('./mail');
 const APP_URL = (process.env.APP_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 4300}`).replace(/\/$/, ''); // never built from the Host header
+// Ticket approval queue (src/tickets.js): proposals refresh on boot, every 15 min, and whenever the queue / report is read.
+TK.init({ readiness, sendAlert, appUrl: APP_URL });
+if (SEEDED_NOW) TK.seedDemo(); else TK.propose(true);
+setInterval(() => { try { TK.propose(true); } catch (e) { console.error('ticket proposals failed', e.message); } }, 15 * 60000).unref();
 const RESET_MIN = 30;
 const COMMON_PW = new Set(['password', 'password1', 'password123', 'qwerty123', 'letmein', 'welcome1', 'changeme', 'iloveyou', 'admin123', '123456789012', 'deployment']);
 function pwProblem(pw, email) {
@@ -271,7 +277,7 @@ app.get('/api/my/status', need('contractor'), (req, res) => {
   const alerts = db.prepare('SELECT * FROM alerts WHERE contractor_id = ? ORDER BY created_at DESC, id DESC LIMIT 50').all(c.id);
   res.json({ contractor: { id: c.id, name: c.name, employee_no: c.employee_no, title: titleName(c.title_id), destination: destName(c.destination_id) },
     readiness: readiness(c), flights, alerts, unread_alerts: alerts.filter((a) => !a.read_at).length,
-    new_flights: flights.filter((f) => !f.seen_at).length });
+    new_flights: flights.filter((f) => !f.seen_at).length, itineraries: TK.forContractor(c.id) });
 });
 app.post('/api/my/flights/seen', need('contractor'), (req, res) => {
   db.prepare("UPDATE flights SET seen_at = datetime('now') WHERE contractor_id = ? AND seen_at IS NULL").run(req.user.contractor_id);
@@ -291,7 +297,7 @@ function mySchedule(c) {
   const blocks = SCH.blocks(c.id).filter((b) => b.end >= SCH.plus(t, -7)).map((b) => ({ ...b, site: b.destination_id ? destName(b.destination_id) : '',
     travel_out: b.kind === 'on' ? b.start : null, travel_home: b.kind === 'on' ? b.end : null,
     flights_out: b.kind === 'on' ? near(b.start).map((f) => f.id) : [], flights_home: b.kind === 'on' ? near(b.end).map((f) => f.id) : [] }));
-  return { today: t, blocks, flights, pattern: { on: c.rotation_on, off: c.rotation_off } };
+  return { today: t, blocks, flights, pattern: { on: c.rotation_on, off: c.rotation_off }, itineraries: TK.forContractor(c.id) };
 }
 app.get('/api/my/schedule', need('contractor'), (req, res) => res.json(mySchedule(me(req))));
 app.get('/api/my/schedule.ics', need('contractor'), (req, res) => {
@@ -839,7 +845,14 @@ function dailyReport(from, days) {
   const summary = { departing: rows.filter((x) => x.direction === 'outbound').length, returning: rows.filter((x) => x.direction === 'return').length,
     flagged: rows.filter((x) => x.flags.length).length, red_traveling: rows.filter((x) => x.status === 'red').length, yellow_traveling: rows.filter((x) => x.status === 'yellow').length,
     no_flight: rows.filter((x) => x.flags.some((f) => f.code === 'no_flight')).length, changed_24h: rows.filter((x) => x.flags.some((f) => f.code === 'changed_24h')).length };
-  return { from, to, days, generated_at: new Date().toISOString(), summary, rows };
+  TK.propose();
+  const tq = TK.list('pending'); const ts = TK.summary();
+  summary.tickets_to_approve = tq.length;
+  const tickets_to_approve = { count: tq.length, headline: ts.text || 'No tickets waiting for approval', names: tq.map((t) => t.contractor.name),
+    items: tq.map((t) => ({ id: t.id, contractor: t.contractor.name, employee_no: t.contractor.employee_no, days_out: t.days_out, depart_date: t.depart_date,
+      destination: t.destination, route: [t.fare.origin, ...t.fare.legs.map((l) => l.to_airport)].join('-'), airline: t.fare.airline, cabin: t.fare.cabin_label,
+      price_usd: t.fare.price_usd, readiness: t.readiness })) };
+  return { from, to, days, generated_at: new Date().toISOString(), summary, tickets_to_approve, rows };
 }
 function reportParams(req) {
   const today = fmtToday();
@@ -1101,6 +1114,47 @@ admin.get('/sos/open', (req, res) => res.json({ open: db.prepare("SELECT a.id, a
 admin.post('/sos/:id/ack', (req, res) => {
   db.prepare("UPDATE admin_alerts SET ack_at = datetime('now'), ack_by = ? WHERE id = ?").run(req.user.email, idParam(req.params.id));
   audit(req, 'sos_ack', req.params.id); res.json({ ok: true });
+});
+// ---------------- Tickets to approve (proposed itineraries; admin confirms -> booking) ----------------
+const CABIN_KEYS = ['first', 'business', 'premium', 'economy'];
+function travelSettings() {
+  const p = assistant.policy();
+  return { ...p, cabins: assistant.CABINS, booking_mode: 'mock',
+    notes: { booking: 'Demo: booking is MOCKED — confirming creates a demo itinerary only; no ticket is issued. Real ticketing needs a travel management company (TMC) or a booking API (e.g. Duffel, Sabre, Amadeus) — to be connected later.',
+      payment: 'Payment is handled outside this app: after the admin confirms, the assistant books the real ticket with the company card. FFD never stores card numbers or any payment data.' } };
+}
+admin.get('/travel/settings', (req, res) => res.json(travelSettings()));
+admin.put('/travel/settings', (req, res) => {
+  const b = req.body || {};
+  const cabin = V.str(b.default_cabin, 12, { required: true, name: 'Default cabin', oneOf: CABIN_KEYS });
+  const hours = V.int(b.longhaul_hours ?? 6, 2, 16, 'Long-haul threshold (hours)');
+  const pref = V.str(b.preferred_airline, 4, { name: 'Preferred airline', oneOf: ['', ...assistant.AIRLINES.map((a) => a.code)] }) || '';
+  db.meta.set('default_cabin', cabin); db.meta.set('longhaul_hours', hours); db.meta.set('preferred_airline', pref || 'none');
+  audit(req, 'travel_settings_update', `cabin=${cabin} longhaul>${hours}h preferred=${pref || 'none'}`);
+  res.json({ ok: true, settings: travelSettings() });
+});
+admin.get('/tickets', (req, res) => {
+  const status = V.str(req.query.status, 10, { name: 'status', oneOf: ['pending', 'done', 'booked', 'confirmed', 'rejected'] }) || 'pending';
+  TK.propose();
+  res.json({ tickets: TK.list(status), counts: TK.counts(), summary: TK.summary(), settings: travelSettings() });
+});
+admin.get('/tickets/summary', (req, res) => res.json(TK.summary()));
+admin.get('/tickets/:id/options', (req, res) => { const o = TK.getOptions(idParam(req.params.id)); if (!o) throw nf(); res.json(o); });
+admin.put('/tickets/:id/fare', (req, res) => {
+  const f = TK.choose(idParam(req.params.id), V.str(req.body.fare_id, 40, { required: true, name: 'Flight option' }), req.user.email);
+  if (!f) throw new V.VErr('That ticket is no longer waiting for approval, or the option is not available');
+  res.json({ ok: true, fare: f });
+});
+admin.post('/tickets/confirm', SEC.limit('tk-confirm', 60, 5 * 60000), (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids : [];
+  if (!ids.length || ids.length > 100) throw new V.VErr('Pick 1–100 tickets');
+  const results = TK.confirm(ids.map((x) => idParam(x)), req.user.email, req.body.allow_red === true);
+  audit(req, 'ticket_confirm_batch', `${results.filter((r) => r.ok).length} confirmed, ${results.filter((r) => !r.ok).length} skipped`);
+  res.json({ ok: true, results });
+});
+admin.post('/tickets/:id/reject', (req, res) => {
+  const ok = TK.reject(idParam(req.params.id), req.user.email, V.str(req.body.reason, 300, { name: 'Reason' }) || '');
+  if (!ok) throw new V.VErr('That ticket is no longer waiting for approval'); res.json({ ok: true });
 });
 app.use('/api/admin', admin);
 

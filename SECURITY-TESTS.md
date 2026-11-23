@@ -235,6 +235,6 @@ Not tested automatically: the 30-minute expiry (the code checks `expires_at` aga
 </details>
 
 ## Known limits / follow-ups
-- Demo passwords are the shared, publicly known demo logins and are in git history. Rotate them and purge the history before any real data goes in.
+- Demo passwords were changed on 2026-11-22 (new values live only in Render env vars and private files on the box). The old ones are still in git history but no longer work. Purge history before any real data goes in if that matters.
 - In demo mode the admin can read reset links in the Outbox. That is by design for demos; turn it off by connecting a mail provider and setting `DEMO_MODE=0`.
 - Rate-limit and lockout counters live in memory on one instance, so a restart clears them. Moving them to Redis/Key Value would make them survive restarts and work across several instances.

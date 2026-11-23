@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # FFD daily deployment report → JSON on stdout.
 #   scripts/daily-report.sh [YYYY-MM-DD]      (default: today in America/Los_Angeles)
+# Includes "tickets_to_approve" (count, headline, names, items) — a one-line summary of it is also printed to stderr.
 # Auth: read-only report token from /home/box/.ffd/report-token (chmod 600, never in the repo).
 # The token only works on GET /api/admin/reports/daily; the server keeps just its SHA-256 (Render env REPORT_TOKEN_SHA256).
 set -euo pipefail
@@ -15,4 +16,12 @@ tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
 code=$(printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' < "$TOKEN_FILE")" | curl -sS --max-time 90 --retry 3 --retry-delay 10 --retry-all-errors \
   -H @- -H 'Accept: application/json' -o "$tmp" -w '%{http_code}' "$BASE/api/admin/reports/daily?date=$DAY")
 if [[ "$code" != "200" ]]; then echo "FFD report request failed: HTTP $code $(head -c 200 "$tmp")" >&2; exit 4; fi
-if command -v python3 >/dev/null; then python3 -m json.tool < "$tmp"; else cat "$tmp"; fi
+if command -v python3 >/dev/null; then
+  python3 -m json.tool < "$tmp"
+  python3 - "$tmp" >&2 <<'PY' || true
+import json, sys
+q = json.load(open(sys.argv[1])).get("tickets_to_approve") or {}
+items = q.get("items") or []
+print(f"Tickets to approve: {q.get('count', 0)}" + (" — " + ", ".join(f"{t['contractor']} ({t['days_out']} d)" for t in items) if items else ""))
+PY
+else cat "$tmp"; fi

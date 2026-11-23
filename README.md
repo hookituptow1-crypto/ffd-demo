@@ -17,7 +17,7 @@ npm run seed            # wipe + reseed demo data (or "Reset demo data" in admin
 npx playwright install chromium && npm run e2e   # full click-through test + screenshots in ./screens
 ```
 
-Demo logins: admin `admin@ffd.demo`, contractors `<firstname>@ffd.demo`. **Passwords are not in this repo** — set `ADMIN_PASSWORD` and `CONTRACTOR_PASSWORD` in the host's environment (otherwise random ones are generated into `data/demo-credentials.json` on the server). The login page never shows demo accounts.
+Demo logins: admin `admin@ffd.demo`, contractors `<firstname>@ffd.demo`. **Passwords are not in this repo** (changed 2026-11-22; the old ones no longer work) — set `ADMIN_PASSWORD` and `CONTRACTOR_PASSWORD` in the host's environment (otherwise random ones are generated into `data/demo-credentials.json` on the server). The login page never shows demo accounts.
 
 `DEMO_MODE=1` enables the demo scenario page, the admin "Reset demo data" button and an automatic reseed every night at 03:00 Pacific. See `SECURITY-TESTS.md` for the security test results.
 
@@ -121,3 +121,13 @@ tools/e2e.js      Playwright click-through of every scenario (writes ./screens)
 
 ## Phone (compact) admin view
 On screens narrower than 768px the admin opens in a **compact view**: status cards (photo, name, title, big status dot, problems first), tappable red / yellow / green / traveling-today chips, a bottom tab bar (Board · Schedule · Report · Map · More), a profile with collapsible Documents / Flights / Contacts / Medical / Schedule sections, and phone-friendly schedule and report lists. The **Compact / Full view** button at the top switches views and is remembered per device. Tablets and laptops open the full view as before. Test: `BASE=... node tools/e2e-mobile.js` (iPhone 390×844).
+
+## Tickets to approve (autonomous proposals, admin makes the final call)
+- Everyone whose **next rotation departure is 30 days or less away** and has no ticket gets a **proposed itinerary** automatically (on boot, every 15 minutes, and whenever the queue or the daily report is read): home airport (or alternate), the **company preferred airline**, the **policy cabin** for long-haul (First by default; Business where the airline sells no First), cheapest sensible fare (no itineraries more than 8 h slower than the quickest).
+- Admin → **🎫 Tickets to approve**: Confirm one, select several and **Confirm selected**, **Swap flight** to an alternate, or **Reject** (with a reason). RED travelers are skipped in bulk; confirming one alone needs an explicit override, written to the audit log.
+- Status: *Waiting for approval* → **Confirmed by admin → Booking** → **Booked**. In this demo the booking step is **mocked** (record locator, flight numbers, times and cabin; no ticket issued).
+- On booking the contractor gets an in-app notification (plus web push if enabled), the itinerary on **My Schedule** with a **Pick your seat / Check in** link to the airline's own manage-trip page (the contractor handles seat and boarding pass), and an itinerary email (Outbox in demo mode; the same pluggable mail hook as reset emails).
+- A banner and badge ("You have 8 tickets to approve today — John Doe is 30 days out") show in both the full and the compact phone view. The Daily Deployment Report (API, page and `scripts/daily-report.sh`) has a `tickets_to_approve` section with the count and names.
+- **Travel policy settings** (on the Tickets page): default long-haul cabin, long-haul threshold (hours), company preferred airline (company preferred list). The booking assistant uses the same policy.
+- **Payment:** handled outside this app. After the admin confirms, the assistant books the real ticket with the company card. FFD stores no card data at all. Real ticketing will need a travel management company or a booking API (Duffel, Sabre, Amadeus) — not connected in the demo.
+- Endpoints (admin-only, CSRF-protected writes, audited): `GET /api/admin/tickets?status=pending|done|rejected`, `GET /api/admin/tickets/summary`, `GET /api/admin/tickets/:id/options`, `PUT /api/admin/tickets/:id/fare`, `POST /api/admin/tickets/confirm {ids, allow_red}`, `POST /api/admin/tickets/:id/reject`, `GET|PUT /api/admin/travel/settings`. Test: `BASE=... node tools/e2e-tickets.js`.
