@@ -31,8 +31,16 @@ async function withToken(tok) {
   V.innerHTML = `<h2>Choose a new password</h2><p class="small mut">For ${esc(c.email)}. You'll be signed out on every device.</p>${pwFields(false)}`; wireRules();
   $('#go').addEventListener('click', async () => { try { await api('POST', '/api/password/reset', { token: tok, password: $('#np').value }); done('All devices were signed out. Sign in with your new password.'); } catch (x) { showErr(x.message); } });
 }
+async function setup(me) { // first sign-in with one-time temporary credentials
+  V.innerHTML = `<h2>Set up your account</h2><p class="small mut">You signed in with a one-time temporary login for ${esc(me.email)}. Choose your own username and password — the temporary login no longer works.</p>
+    <label for="un">New username</label><input id="un" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required maxlength="32" pattern="[a-z0-9][a-z0-9._-]{2,31}">
+    <p class="small mut">3–32 characters: letters, numbers, dot, dash or underscore.</p>${pwFields(false).replace('Save new password', 'Save and continue')}`; wireRules();
+  $('#go').addEventListener('click', async () => { try { const r = await api('POST', '/api/account/setup', { username: $('#un').value.trim().toLowerCase(), password: $('#np').value });
+    location.href = r.role === 'admin' ? '/admin.html' : '/app.html'; } catch (x) { showErr(x.message); } });
+}
 async function change() {
   let me; try { me = await api('GET', '/api/me'); DRS.csrf = me.csrf; } catch { location.href = '/'; return; }
+  if (me.must_setup) return setup(me);
   V.innerHTML = `<h2>Set a new password</h2><p class="small mut">${me.must_change ? 'Your administrator gave you a temporary password. Choose your own to continue.' : 'Change the password for'} ${esc(me.email)}.</p>${pwFields(true)}`; wireRules();
   $('#go').addEventListener('click', async () => { try { const r = await api('POST', '/api/password/change', { current: $('#cur').value, password: $('#np').value });
     location.href = r.role === 'admin' ? '/admin.html' : '/app.html'; } catch (x) { showErr(x.message); } });

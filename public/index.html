@@ -6,12 +6,14 @@
   <div class="logo"><img src="/icons/logo.png" alt=""><div><div class="brand" data-brand="short">FFD</div><div class="mut small" data-brand="long">Fit For Deployment</div></div></div>
   <p class="mut" data-brand="tagline">Deployment readiness, confirmed.</p>
   <form id="f" class="card mt" autocomplete="on" method="post" action="/">
-    <label for="email">Email</label><input id="email" type="email" autocomplete="username" required>
+    <label for="email">Email or username</label><input id="email" type="text" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" autocomplete="username" required maxlength="120">
     <label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required>
     <button class="btn pri block mt">Sign in</button>
     <p id="err" class="small hidden"></p>
     <p class="small center mt"><a href="/reset.html#forgot" id="forgot">Forgot password?</a></p>
   </form>
+  <p id="demoTag" class="small center mt hidden"><span class="pill yellow">DEMO ENVIRONMENT</span> fictional people and data</p>
+  <p class="small mut center mt">No self sign-up — your FFD administrator issues your first login.</p>
   <p class="small mut center mt">Private system · authorized personnel only · all access is logged</p>
 </div>
 <script src="/js/brand.js"></script><script src="/js/common.js"></script><script src="/js/login.js"></script></body></html>

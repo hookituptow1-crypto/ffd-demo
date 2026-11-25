@@ -232,7 +232,10 @@ async function subAccount(d) {
       <p class="small">${a.locked ? '<span class="pill red">LOCKED</span> too many failed sign-ins' : '<span class="pill green">not locked</span>'} · ${a.failures_last_hour} failed in the last hour · ${a.sessions} active session(s)
       ${a.must_change ? ' · <span class="pill yellow">must change password at next sign-in</span>' : ''}${a.reset_link_pending ? ' · <span class="pill blue">reset link pending</span>' : ''}</p>
       <p class="small mut">Last sign-in ${a.last_login ? `${esc(a.last_login)} UTC` : '—'} · password last changed ${a.pw_changed_at ? `${esc(a.pw_changed_at)} UTC` : '— (initial)'}</p>`
-    : '<p class="small">No app login yet. Set one below.</p>'}
+    : '<p class="small">No app login yet. Send a one-time login below, or set one by hand.</p>'}
+    ${a && a.username ? `<p class="small">Username <b>${esc(a.username)}</b></p>` : ''}${a && a.temp_pending ? `<p class="small"><span class="pill blue">one-time login sent</span> unused · expires ${esc(new Date(a.temp_expires_at).toLocaleString())}</p>` : ''}${a && a.must_setup && !a.temp_pending ? '<p class="small"><span class="pill yellow">account setup not finished</span></p>' : ''}
+    <h3 class="mt">Send one-time login</h3><p class="small mut">FFD makes a temporary username + password that works once (24 h) and emails it straight to the person. You never see it. At first sign-in they must choose their own username and password.</p>
+    <div class="row"><input id="ivE" placeholder="Email" value="${esc((a && a.email) || d.contractor.email || '')}"><button class="btn pri" id="ivGo">✉️ Send one-time login</button></div>
     <h3 class="mt">Login email${a ? '' : ' + first password'}</h3>
     <div class="grid2"><div><label>Login email</label><input id="acE" value="${esc(d.account_email || d.contractor.email)}"></div><div><label>Password (10+ chars)</label><input id="acP" type="password" autocomplete="new-password" placeholder="${a ? 'leave blank to keep' : ''}"></div></div>
     <button class="btn mt" id="acS">Save login</button></div>
@@ -243,6 +246,9 @@ async function subAccount(d) {
     <h3 class="mt">Reset by email</h3><div class="row"><button class="btn" id="rlGo">✉️ Send reset link</button><button class="btn" id="frGo">⛔ Force password reset</button></div>
     <p class="small mut">Force = sign them out now and require a new password before they can use the app.${DRS.me && DRS.me.demo !== false ? ' Demo: emails land in the <a href="#/outbox">Outbox</a>.' : ''}</p>
     <h3 class="mt">Unlock account</h3><button class="btn" id="ulGo">🔓 Unlock account</button></div>` : ''}</div>`;
+  $('#ivGo').addEventListener('click', () => guard(async () => {
+    if (!confirm(`Send ${d.contractor.name} a one-time temporary login? Any current login for them stops working until they set up their account.`)) return;
+    const r = await api('POST', `/api/admin/contractors/${cid}/invite`, { email: $('#ivE').value }); toast(r.delivered === 'outbox' ? `One-time login sent to ${r.to} (demo: see Outbox)` : `One-time login emailed to ${r.to}`); setTimeout(() => subAccount(d), 400); }));
   $('#acS').addEventListener('click', () => guard(async () => {
     if (a && !$('#acP').value) { toast('Type a password to change the login, or use “Set temporary password”.', true); return; }
     await api('PUT', `/api/admin/contractors/${cid}/account`, { email: $('#acE').value, password: $('#acP').value }); toast('Login saved'); subAccount(d); }));

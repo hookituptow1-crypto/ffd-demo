@@ -1,0 +1,16 @@
+{
+  "name": "ffd-ios",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Native iOS shell for FFD (loads https://ffd-demo-tyop.onrender.com; sign-in only with server-issued credentials). Not part of the web server.",
+  "scripts": {
+    "sync": "cap sync ios"
+  },
+  "dependencies": {
+    "@capacitor/core": "8.6.3",
+    "@capacitor/ios": "8.6.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.6.3"
+  }
+}

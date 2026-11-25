@@ -20,7 +20,7 @@ const ADMIN_EMAIL = 'admin@ffd.demo';
 // password change on the host takes effect with a plain restart (no reseed). Only touches the seeded @ffd.demo accounts.
 function syncPasswords() {
   const pw = demoPasswords(); let n = 0;
-  for (const u of db.prepare("SELECT id, role, password_hash FROM users WHERE email LIKE '%@ffd.demo'").all()) {
+  for (const u of db.prepare("SELECT id, role, password_hash FROM users WHERE email LIKE '%@ffd.demo' AND kind = 'demo'").all()) {
     const want = u.role === 'admin' ? pw.admin : pw.contractor;
     if (!verifyPassword(want, u.password_hash)) { db.prepare('UPDATE users SET password_hash = ?, must_change = 0 WHERE id = ?').run(hashPassword(want), u.id); db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id); n++; }
   }
@@ -34,8 +34,14 @@ function seed() {
   const UP = path.join(__dirname, '..', 'data', 'uploads');
   for (const u of db.prepare('SELECT file FROM uploads').all()) { try { fs.unlinkSync(path.join(UP, u.file)); } catch {} }
   try { db.exec('DELETE FROM tickets'); } catch {} // ticket approval queue (table created by tickets.js)
-  db.exec(`DELETE FROM sessions; DELETE FROM outbox; DELETE FROM password_resets; DELETE FROM push_subs; DELETE FROM schedule_blocks; DELETE FROM checkins; DELETE FROM admin_alerts; DELETE FROM alerts; DELETE FROM uploads; DELETE FROM flights;
-    DELETE FROM blockers; DELETE FROM documents; DELETE FROM profiles; DELETE FROM users; DELETE FROM contractors;
+  // Real accounts survive every reseed: the owner admin and people onboarded with server-issued credentials (kind owner/invited).
+  // Their contractor record is snapshotted, unlinked while demo data is rebuilt, then re-linked (or recreated) by employee number.
+  const kept = db.prepare("SELECT u.id uid, c.* FROM users u JOIN contractors c ON c.id = u.contractor_id WHERE u.kind IN ('owner','invited')").all();
+  db.prepare("UPDATE users SET contractor_id = NULL WHERE kind IN ('owner','invited')").run();
+  const keptEmp = new Set(kept.map((k) => k.employee_no));
+  db.exec(`DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE kind = 'demo'); DELETE FROM outbox WHERE ref IS NULL OR ref NOT LIKE 'invite:%';
+    DELETE FROM password_resets WHERE user_id IN (SELECT id FROM users WHERE kind = 'demo'); DELETE FROM push_subs; DELETE FROM schedule_blocks; DELETE FROM checkins; DELETE FROM admin_alerts; DELETE FROM alerts; DELETE FROM uploads; DELETE FROM flights;
+    DELETE FROM blockers; DELETE FROM documents; DELETE FROM profiles; DELETE FROM users WHERE kind = 'demo'; DELETE FROM contractors;
     DELETE FROM destination_requirements; DELETE FROM destinations; DELETE FROM requirement_types;`); // audit_log is kept across resets
 
   const rt = db.prepare(`INSERT INTO requirement_types (name, category, has_expiry, min_validity_days, lead_days, instructions, keyword)
@@ -82,7 +88,7 @@ function seed() {
   const prof = db.prepare('INSERT INTO profiles (contractor_id, data_enc, updated_by) VALUES (?,?,?)');
   const PW = demoPasswords();
   const pwHash = hashPassword(PW.contractor);
-  user.run(ADMIN_EMAIL, hashPassword(PW.admin), 'admin', null);
+  if (!db.prepare('SELECT 1 FROM users WHERE email = ?').get(ADMIN_EMAIL)) user.run(ADMIN_EMAIL, hashPassword(PW.admin), 'admin', null);
 
   // Default "far-out" expiries; per-contractor overrides below.
   const GOOD = { 'Passport': 2200, 'Iraq Work Visa': 700, 'Kuwait Work Visa': 700, 'Djibouti Entry Visa': 600, 'Niger Visa': 600,
@@ -152,7 +158,7 @@ function seed() {
     const phone = `(555) 01${String(i).padStart(2, '0')}-${2000 + i * 37}`;
     const cid = Number(ins.run(name, emp, phone, email, home, alt, D[dn], d(off), ovr, ovr ? ovrReason : null, scenario).lastInsertRowid);
     ids[name] = cid;
-    user.run(email, pwHash, 'contractor', cid);
+    if (!keptEmp.has(emp) && !db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) user.run(email, pwHash, 'contractor', cid); // a kept real login already owns this person
     const destReqs = GEN[name] && GEN[name].kind === 'swing' ? db.prepare('SELECT * FROM requirement_types').all() : reqsFor.all(D[dn]); // swing crew float, so they hold every site's visas/shots
     const G = GEN[name]; const hw = (G && G.gender === 'Female') ? [['5', '4', '132'], ['5', '6', '141'], ['5', '7', '150'], ['5', '3', '126']][i % 4] : [['5', '9', '176'], ['5', '11', '188'], ['6', '0', '196'], ['5', '10', '182'], ['6', '2', '210']][i % 5];
     const look = LOOK[name] || (G ? [G.gender, G.age, G.hair, G.eyes, ...hw] : ['Male', 29 + i * 2, 'Brown', 'Brown', '5', '10', '185']);
@@ -351,10 +357,20 @@ function seed() {
   dir = 'outbound';
   db.prepare("UPDATE contractors SET tracking_consent = 1, tracking_consent_at = datetime('now', '-18 days') WHERE id = ?").run(ids['David Tran']);
   ['-7 hours', '-2 hours'].forEach((t, j) => ci.run(ids['David Tran'], j ? 'checkin' : 'auto', enc({ lat: 11.5432 + j * 0.002, lng: 43.1490 + j * 0.002, acc: 20 }), t));
+  // re-link kept real accounts to their contractor (seeded person with the same employee no., else recreate the record)
+  for (const k of kept) {
+    let c = db.prepare('SELECT id FROM contractors WHERE employee_no = ?').get(k.employee_no);
+    if (!c) {
+      const r = db.prepare(`INSERT INTO contractors (name, employee_no, phone, email, home_airport, alt_airport, rotation_on, rotation_off, notes)
+        VALUES (?,?,?,?,?,?,?,?,?)`).run(k.name, k.employee_no, k.phone || '', k.email || '', k.home_airport || '', k.alt_airport || '', k.rotation_on || 60, k.rotation_off || 30, k.notes || '');
+      c = { id: Number(r.lastInsertRowid) };
+    }
+    db.prepare('UPDATE users SET contractor_id = ? WHERE id = ?').run(c.id, k.uid);
+  }
   db.meta.set('seed_version', SEED_VERSION);
   return { ids };
 }
 
-const SEED_VERSION = '15'; // bump when demo data shape changes; demo servers reseed on boot
+const SEED_VERSION = '16'; // bump when demo data shape changes; demo servers reseed on boot
 module.exports = { syncPasswords, seed, SEED_VERSION };
 if (require.main === module) { seed(); console.log('Seeded.'); }

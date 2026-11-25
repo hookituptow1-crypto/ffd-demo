@@ -1,0 +1,17 @@
+{
+  "appId": "com.millingtontransmission.ffd",
+  "appName": "FFD",
+  "webDir": "www",
+  "server": {
+    "url": "https://ffd-demo-tyop.onrender.com",
+    "allowNavigation": [
+      "ffd-demo-tyop.onrender.com"
+    ]
+  },
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#0a0b08",
+    "limitsNavigationsToAppBoundDomains": false,
+    "appendUserAgent": "FFD-iOS"
+  }
+}

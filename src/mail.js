@@ -6,6 +6,7 @@
 //  - MAIL_PROVIDER=smtp    + SMTP_URL (smtps://user:pass@host:465) + MAIL_FROM -> needs `npm i nodemailer` (loaded only if present)
 // Sending never throws into the request: failures are recorded on the outbox row and logged (without the body).
 const db = require('./db');
+const C = require('./crypto');
 const DEMO_MODE = process.env.DEMO_MODE !== '0';
 const FROM = process.env.MAIL_FROM || 'FFD <no-reply@ffd.demo>';
 const provider = () => (process.env.MAIL_PROVIDER || '').toLowerCase();
@@ -27,11 +28,15 @@ async function deliver(msg) {
   }
   return 'outbox-only';
 }
-async function send(to, subject, text, kind = 'notice') {
+// opts.sensitive: the Outbox copy is stored encrypted (AES-GCM, DATA_KEY) and can later be redacted via opts.ref
+async function send(to, subject, text, kind = 'notice', opts = {}) {
   const keep = DEMO_MODE || process.env.MAIL_OUTBOX === '1';
-  const id = keep ? Number(db.prepare('INSERT INTO outbox (to_email, subject, body, kind, status) VALUES (?,?,?,?,?)').run(to, subject, text, kind, provider() ? 'sending' : 'outbox-only').lastInsertRowid) : null;
-  if (!provider()) return;
+  const body = opts.sensitive ? `enc:${C.encrypt(Buffer.from(text)).toString('base64')}` : text;
+  const id = keep ? Number(db.prepare('INSERT INTO outbox (to_email, subject, body, kind, status, ref) VALUES (?,?,?,?,?,?)').run(to, subject, body, kind, provider() ? 'sending' : 'outbox-only', opts.ref || null).lastInsertRowid) : null;
+  if (!provider()) return id;
   try { const s = await deliver({ to, subject, text }); if (id) db.prepare('UPDATE outbox SET status = ? WHERE id = ?').run(s, id); }
   catch (e) { console.error(`mail ${kind} to ${to} failed: ${e.message}`); if (id) db.prepare("UPDATE outbox SET status = 'failed' WHERE id = ?").run(id); }
 }
-module.exports = { send, provider };
+const view = (m) => { if (typeof m.body === 'string' && m.body.startsWith('enc:')) { try { return { ...m, body: C.decrypt(Buffer.from(m.body.slice(4), 'base64')).toString() }; } catch { return { ...m, body: '[unreadable]' }; } } return m; };
+const redact = (ref, why) => db.prepare("UPDATE outbox SET body = ? WHERE ref = ? AND body LIKE 'enc:%'").run(`[Temporary credentials ${why} — removed from the Outbox]`, ref).changes;
+module.exports = { send, provider, view, redact };

@@ -220,3 +220,13 @@ CREATE TABLE IF NOT EXISTS outbox (
   status TEXT NOT NULL DEFAULT 'outbox-only', created_at TEXT NOT NULL DEFAULT (datetime('now')));`);
 addCol('contractors', 'swing', 'INTEGER NOT NULL DEFAULT 0');
 addCol('flights', 'cabin', "TEXT DEFAULT ''"); // First / Business / ... (approved tickets)
+// --- server-issued accounts (v16): usernames, owner account, one-time temporary credentials ---
+addCol('users', 'username', 'TEXT');                         // optional login name (no "@"); email still works
+addCol('users', 'kind', "TEXT NOT NULL DEFAULT 'demo'");     // demo (wiped on reseed) | owner | invited (kept across reseeds)
+addCol('users', 'must_setup', 'INTEGER NOT NULL DEFAULT 0'); // signed in with one-time temp creds: must pick own username + password
+addCol('users', 'temp_expires_at', 'INTEGER');               // temp credentials stop working after this (ms epoch)
+addCol('users', 'temp_used_at', 'INTEGER');                  // temp credentials are single-use
+addCol('outbox', 'ref', 'TEXT');                             // e.g. invite:<userId> (body encrypted, redacted once used)
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users(username COLLATE NOCASE) WHERE username IS NOT NULL');
+// Accounts created by an admin before v16 are real people, not demo data
+db.exec("UPDATE users SET kind = 'invited' WHERE kind = 'demo' AND email NOT LIKE '%@ffd.demo'");

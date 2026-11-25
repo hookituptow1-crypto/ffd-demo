@@ -11,6 +11,7 @@ const assistant = require('./assistant');
 const { seed, SEED_VERSION, syncPasswords } = require('./seed');
 const SEC = require('./security');
 const TK = require('./tickets');
+const OWNER = require('./owner');
 
 const PORT = Number(process.env.PORT || 4300);
 const DEMO_MODE = process.env.DEMO_MODE !== '0';
@@ -18,14 +19,19 @@ const SESSION_HOURS = 12;
 const UPLOAD_DIR = path.join(__dirname, '..', 'data', 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 let SEEDED_NOW = false;
-if (!db.prepare('SELECT COUNT(*) n FROM users').get().n || (DEMO_MODE && db.meta.get('seed_version') !== SEED_VERSION)) {
+// Demo auto-setup (idempotent). Demo mode is on unless DEMO_MODE=0. The demo data set is (re)built only when there is no demo
+// data yet or the seed version changed — never on a plain restart — and real accounts (owner + invited) are always kept.
+const countUsers = (where) => db.prepare(`SELECT COUNT(*) n FROM users WHERE ${where}`).get().n;
+const demoNeedsSeed = () => !countUsers("kind != 'owner'") || (DEMO_MODE && (db.meta.get('seed_version') !== SEED_VERSION || !countUsers("kind = 'demo'")));
+if (demoNeedsSeed()) {
   for (const f of fs.readdirSync(UPLOAD_DIR)) fs.unlinkSync(path.join(UPLOAD_DIR, f));
   seed(); console.log(`Seeded demo data v${SEED_VERSION}`); SEEDED_NOW = true;
 }
 if (DEMO_MODE) { const n = syncPasswords(); if (n) console.log(`Demo account passwords updated from env (${n} accounts)`); }
+OWNER.ensure();
 function resetDemo(reason) {
   for (const f of fs.readdirSync(UPLOAD_DIR)) fs.unlinkSync(path.join(UPLOAD_DIR, f));
-  seed(); TK.seedDemo();
+  seed(); TK.seedDemo(); OWNER.ensure();
   db.prepare("INSERT INTO audit_log (user_id, action, details, ip) VALUES (NULL, 'demo_reseed', ?, '')").run(reason);
   console.log(`Demo reseeded: ${reason}`);
 }
@@ -83,8 +89,8 @@ function auth(req, res, next) {
   req.clientIp = SEC.clientIp(req);
   const tok = getTok(req);
   if (tok) {
-    const s = db.prepare('SELECT s.*, u.email, u.role, u.contractor_id, u.must_change FROM sessions s JOIN users u ON u.id = s.user_id WHERE token_hash = ?').get(C.sha256(tok));
-    if (s && s.expires_at > Date.now()) req.user = { id: s.user_id, email: s.email, role: s.role, contractor_id: s.contractor_id, csrf: s.csrf, must_change: !!s.must_change };
+    const s = db.prepare('SELECT s.*, u.email, u.username, u.role, u.contractor_id, u.must_change, u.must_setup, u.kind FROM sessions s JOIN users u ON u.id = s.user_id WHERE token_hash = ?').get(C.sha256(tok));
+    if (s && s.expires_at > Date.now()) req.user = { id: s.user_id, email: s.email, username: s.username, role: s.role, contractor_id: s.contractor_id, csrf: s.csrf, must_change: !!s.must_change || !!s.must_setup, must_setup: !!s.must_setup, kind: s.kind };
   }
   next();
 }
@@ -101,8 +107,15 @@ app.use('/api', (req, res, next) => {
 });
 // A user with a temporary / force-reset password can only change it (or sign out) until they do.
 app.use('/api', (req, res, next) => {
-  if (!req.user || !req.user.must_change || ['/me', '/logout', '/password/change'].includes(req.path)) return next();
-  res.status(403).json({ error: 'You must choose a new password before continuing.', must_change: true });
+  if (!req.user || !req.user.must_change || ['/me', '/logout', '/config', req.user.must_setup ? '/account/setup' : '/password/change'].includes(req.path)) return next();
+  res.status(403).json({ error: req.user.must_setup ? 'Set up your own username and password before continuing.' : 'You must choose a new password before continuing.', must_change: true, must_setup: req.user.must_setup });
+});
+// Owner admin account: every state-changing call made in an owner session is written to the audit log.
+app.use('/api', (req, res, next) => {
+  if (req.user && req.user.kind === 'owner' && !['GET', 'HEAD'].includes(req.method)) {
+    db.prepare('INSERT INTO audit_log (user_id, action, details, ip) VALUES (?,?,?,?)').run(req.user.id, 'owner_action', `${req.method} ${req.path}`.slice(0, 500), req.clientIp || '');
+  }
+  next();
 });
 const need = (role) => (req, res, next) => {
   if (!req.user) return res.status(401).json({ error: 'Sign in required' });
@@ -147,17 +160,26 @@ function sendAlert(cids, kind, title, body, by) {
 // 50 failures per account per hour from all IPs. Responses are identical for unknown users, wrong passwords and
 // lockouts (no account enumeration), and a hash is always computed so timing doesn't leak either.
 const DUMMY_HASH = C.hashPassword(C.token());
-app.post('/api/login', SEC.limit('login', 60, 15 * 60000), wrap(async (req, res) => {
+// Owner sign-ins use their own per-IP budget, so other people's failed attempts (or a busy shared office IP) can never block the owner.
+const isOwnerId = (b) => { const id = String((b && (b.email ?? b.username)) || '').trim().toLowerCase(); return !!id && (id === OWNER.USERNAME || id === OWNER.EMAIL); };
+const loginLimit = (req, res, next) => (isOwnerId(req.body) ? SEC.limit('login-owner', 30, 5 * 60000) : SEC.limit('login', 60, 15 * 60000))(req, res, next);
+app.post('/api/login', loginLimit, wrap(async (req, res) => {
   const ip = req.clientIp;
-  const email = V.str(req.body.email, 120, { required: true, name: 'Email' }).toLowerCase();
+  const email = V.str(req.body.email ?? req.body.username, 120, { required: true, name: 'Email or username' }).toLowerCase(); // email OR username
   const password = V.str(req.body.password, 200, { required: true, name: 'Password' });
   const W = 5 * 60000; // lockout counters live in memory only, so every deploy/restart clears them
-  const blocked = SEC.peek(`lf-ip:${ip}`, W) >= 20 || SEC.peek(`lf-acct-ip:${email}:${ip}`, W) >= 10 || SEC.peek(`lf-acct:${email}`, 3600000) >= 50;
-  const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-  const good = C.verifyPassword(password, u ? u.password_hash : DUMMY_HASH) && !!u;
+  const u = db.prepare('SELECT * FROM users WHERE email = ? OR (username IS NOT NULL AND username = ?)').get(email, email);
+  const isOwner = !!u && u.kind === 'owner';
+  // The owner account is never locked out (it is protected by a long random server-side secret instead); everyone else is.
+  const blocked = !isOwner && (SEC.peek(`lf-ip:${ip}`, W) >= 20 || SEC.peek(`lf-acct-ip:${email}:${ip}`, W) >= 10 || SEC.peek(`lf-acct:${email}`, 3600000) >= 50);
+  let good = C.verifyPassword(password, u ? u.password_hash : DUMMY_HASH) && !!u;
+  if (isOwner && !OWNER.enabled()) good = false; // owner secret not configured on the server -> owner login disabled
+  // One-time temporary credentials: valid once, until they expire
+  const tempDead = good && u.must_setup && (u.temp_used_at || !u.temp_expires_at || u.temp_expires_at < Date.now());
+  if (tempDead) good = false;
   if (blocked || !good) {
-    if (!good) { SEC.hit(`lf-ip:${ip}`, 1e9, W); SEC.hit(`lf-acct-ip:${email}:${ip}`, 1e9, W); SEC.hit(`lf-acct:${email}`, 1e9, 3600000); }
-    audit({ clientIp: ip, user: u ? { id: u.id } : null }, blocked ? 'login_blocked' : 'login_failed', email);
+    if (!good && !isOwner) { SEC.hit(`lf-ip:${ip}`, 1e9, W); SEC.hit(`lf-acct-ip:${email}:${ip}`, 1e9, W); SEC.hit(`lf-acct:${email}`, 1e9, 3600000); }
+    audit({ clientIp: ip, user: u ? { id: u.id } : null }, blocked ? 'login_blocked' : tempDead ? 'temp_login_rejected' : isOwner ? 'owner_login_failed' : 'login_failed', email);
     await new Promise((r) => setTimeout(r, 300 + Math.random() * 300)); // slow down guessing
     return res.status(401).json({ error: 'Email or password is incorrect, or too many attempts. Wait 5 minutes and try again.' });
   }
@@ -168,8 +190,9 @@ app.post('/api/login', SEC.limit('login', 60, 15 * 60000), wrap(async (req, res)
   db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(now);
   db.prepare('INSERT INTO sessions (token_hash, user_id, csrf, expires_at) VALUES (?,?,?,?)').run(C.sha256(tok), u.id, csrf, now + SESSION_HOURS * 3600000);
   res.set('Set-Cookie', `${COOKIE(req)}=${tok}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${SESSION_HOURS * 3600}${req.secure ? '; Secure' : ''}`);
-  audit({ clientIp: ip, user: { id: u.id } }, 'login', email);
-  res.json({ role: u.role, csrf, must_change: !!u.must_change });
+  if (u.must_setup) { db.prepare('UPDATE users SET temp_used_at = ? WHERE id = ?').run(now, u.id); redactInvite(u.id, 'used'); }
+  audit({ clientIp: ip, user: { id: u.id } }, isOwner ? 'owner_login' : u.must_setup ? 'temp_login' : 'login', email);
+  res.json({ role: u.role, csrf, must_change: !!u.must_change || !!u.must_setup, must_setup: !!u.must_setup });
 }));
 app.post('/api/logout', need(), (req, res) => {
   db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(C.sha256(getTok(req) || ''));
@@ -223,7 +246,7 @@ app.post('/api/password/forgot', SEC.limit('pwf-ip', 5, 15 * 60000), wrap(async 
   const t0 = Date.now();
   if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) && SEC.hit(`pwf-em:${email}`, 3, 3600000).ok) { // per-email cap is silent: same answer either way
     const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-    if (u) { resetMail(u, issueReset(u, 'self'), false); audit({ clientIp: req.clientIp, user: { id: u.id } }, 'password_reset_requested', email); }
+    if (u && u.kind !== 'owner') { resetMail(u, issueReset(u, 'self'), false); audit({ clientIp: req.clientIp, user: { id: u.id } }, 'password_reset_requested', email); }
   }
   await new Promise((r) => setTimeout(r, Math.max(0, 450 - (Date.now() - t0)) + Math.random() * 150)); // equal timing for known/unknown emails
   res.set('Cache-Control', 'no-store').json(SAME);
@@ -250,6 +273,7 @@ app.post('/api/password/reset', SEC.limit('pwr-ip', 10, 15 * 60000), (req, res) 
 });
 app.post('/api/password/change', need(), SEC.limit('pwc', 10, 15 * 60000), (req, res) => {
   const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (u.kind === 'owner') return res.status(400).json({ error: 'The owner admin password is managed on the server (Render env var OWNER_ADMIN_PASSWORD).' });
   if (!C.verifyPassword(String(req.body.current || ''), u.password_hash)) { audit(req, 'password_change_failed', u.email); return res.status(400).json({ error: 'Current password is not correct.' }); }
   strong(req.body.password, u.email);
   if (req.body.password === req.body.current) throw new V.VErr('The new password must be different from the current one.');
@@ -260,8 +284,41 @@ app.post('/api/password/change', need(), SEC.limit('pwc', 10, 15 * 60000), (req,
 });
 app.get('/api/me', (req, res) => {
   if (!req.user) return res.status(401).json({ error: 'Sign in required' });
-  res.json({ email: req.user.email, role: req.user.role, csrf: req.user.csrf, vapid: VAPID.publicKey, must_change: req.user.must_change });
+  res.json({ email: req.user.email, username: req.user.username || null, role: req.user.role, owner: req.user.kind === 'owner', csrf: req.user.csrf, vapid: VAPID.publicKey, must_change: req.user.must_change, must_setup: req.user.must_setup, demo: DEMO_MODE });
 });
+// Public app bootstrap (no auth, no secrets). The iOS app and the sign-in page call this on launch: it reports whether this
+// server is the demo environment and, in demo mode, makes sure the demo data set is present (self-heals an empty or
+// outdated database; a no-op otherwise, so repeated launches never duplicate anything).
+let demoHealing = false;
+app.get('/api/config', SEC.limit('config', 120, 5 * 60000), (req, res) => {
+  let healed = false;
+  if (DEMO_MODE && !demoHealing && demoNeedsSeed()) {
+    demoHealing = true;
+    try { resetDemo('auto-setup on app launch (demo data missing or outdated)'); syncPasswords(); healed = true; } finally { demoHealing = false; }
+  }
+  res.set('Cache-Control', 'no-store').json({ app: 'FFD', demo: DEMO_MODE, seed_version: DEMO_MODE ? SEED_VERSION : undefined, healed,
+    signup: false, auth: 'server-issued', min_ios_build: Number(process.env.MIN_IOS_BUILD || 1) });
+});
+// First sign-in with one-time temporary credentials: the person must choose their own username + password before anything else.
+const USERNAME_RE = /^[a-z0-9][a-z0-9._-]{2,31}$/;
+app.post('/api/account/setup', need(), SEC.limit('setup', 10, 15 * 60000), (req, res) => {
+  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (!u.must_setup) return res.status(400).json({ error: 'Your account is already set up.' });
+  const username = String(req.body.username || '').trim().toLowerCase();
+  if (!USERNAME_RE.test(username)) throw new V.VErr('Username: 3–32 characters, letters, numbers, dot, dash or underscore (start with a letter or number).');
+  if (/^tmp-/.test(username) || username === OWNER.USERNAME || /^(admin|root|owner|support|system)$/.test(username)) throw new V.VErr('Choose a different username.');
+  if (db.prepare('SELECT 1 FROM users WHERE username = ? AND id != ?').get(username, u.id)) throw new V.VErr('That username is taken — choose another.');
+  strong(req.body.password, u.email);
+  if (C.verifyPassword(req.body.password, u.password_hash)) throw new V.VErr('Choose a new password, not the temporary one.');
+  db.prepare("UPDATE users SET username = ?, password_hash = ?, must_change = 0, must_setup = 0, temp_expires_at = NULL, temp_used_at = NULL, pw_changed_at = datetime('now') WHERE id = ?")
+    .run(username, C.hashPassword(req.body.password), u.id);
+  afterPasswordChange(u, req, 'when you set up your account', true);
+  audit(req, 'account_setup_completed', `${u.email} → username ${username}`);
+  res.json({ ok: true, role: u.role, username });
+});
+function redactInvite(userId, why) { MAIL.redact(`invite:${userId}`, why); }
+// Expired, unused temporary credentials are removed from the Outbox
+setInterval(() => { for (const u of db.prepare('SELECT id FROM users WHERE must_setup = 1 AND temp_used_at IS NULL AND temp_expires_at < ?').all(Date.now())) redactInvite(u.id, 'expired'); }, 5 * 60000).unref();
 // Demo scenario list (admin only; never includes passwords)
 app.get('/api/demo-info', need('admin'), (req, res) => {
   if (!DEMO_MODE) return res.json({ demo: false });
@@ -597,8 +654,8 @@ admin.put('/contractors/:id/account', (req, res) => {
   const pw = V.str(req.body.password, 200, { required: true, name: 'Temporary password' });
   if (pw.length < 10) throw new V.VErr('Password must be at least 10 characters');
   const u = db.prepare('SELECT id FROM users WHERE contractor_id = ?').get(c.id);
-  if (u) { db.prepare('UPDATE users SET email = ?, password_hash = ? WHERE id = ?').run(email, C.hashPassword(pw), u.id); db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id); }
-  else db.prepare("INSERT INTO users (email, password_hash, role, contractor_id) VALUES (?,?,'contractor',?)").run(email, C.hashPassword(pw), c.id);
+  if (u) { db.prepare("UPDATE users SET email = ?, password_hash = ?, kind = 'invited', must_setup = 0 WHERE id = ?").run(email, C.hashPassword(pw), u.id); db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id); }
+  else db.prepare("INSERT INTO users (email, password_hash, role, contractor_id, kind) VALUES (?,?,'contractor',?,'invited')").run(email, C.hashPassword(pw), c.id);
   audit(req, 'account_set', c.name); res.json({ ok: true });
 });
 const acctFor = (cid) => { const u = db.prepare('SELECT * FROM users WHERE contractor_id = ?').get(cid); if (!u) throw new V.VErr('This contractor has no app login yet — set one first.'); return u; };
@@ -611,7 +668,7 @@ admin.get('/contractors/:id/account', (req, res) => {
   const sess = db.prepare('SELECT COUNT(*) n FROM sessions WHERE user_id = ? AND expires_at > ?').get(u.id, Date.now()).n;
   const last = db.prepare("SELECT at FROM audit_log WHERE user_id = ? AND action = 'login' ORDER BY id DESC LIMIT 1").get(u.id);
   const link = db.prepare('SELECT expires_at, created_by FROM password_resets WHERE user_id = ? AND used_at IS NULL AND expires_at > ?').get(u.id, Date.now());
-  res.json({ account: { email: u.email, must_change: !!u.must_change, pw_changed_at: u.pw_changed_at, sessions: sess, last_login: last ? last.at : null, reset_link_pending: !!link, ...lockState(u.email) } });
+  res.json({ account: { email: u.email, username: u.username, kind: u.kind, must_setup: !!u.must_setup, temp_pending: !!(u.must_setup && !u.temp_used_at && u.temp_expires_at > Date.now()), temp_expires_at: u.temp_expires_at, must_change: !!u.must_change, pw_changed_at: u.pw_changed_at, sessions: sess, last_login: last ? last.at : null, reset_link_pending: !!link, ...lockState(u.email) } });
 });
 const readablePw = () => { const W = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'; const b = crypto.randomBytes(14);
   const core = [...b].map((x) => W[x % W.length]).join(''); return `${core.slice(0, 4)}-${core.slice(4, 8)}-${core.slice(8, 12)}${'!#%+'[b[12] % 4]}${2 + (b[13] % 8)}`; };
@@ -637,9 +694,40 @@ admin.post('/contractors/:id/unlock', (req, res) => {
   const n = db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id).changes;
   audit(req, 'account_unlocked', `${c.name} (lockout cleared; ${n} session(s) ended)`); res.json({ ok: true, sessions_ended: n });
 });
+// Onboard a person with ONE-TIME temporary credentials, delivered only over the mail channel (Outbox in demo mode — stored
+// encrypted and redacted once used or expired). Nothing secret is returned to the admin's browser. The temp username +
+// password work once, within TEMP_HOURS; the first sign-in must set a permanent username + password.
+const TEMP_HOURS = Math.min(72, Math.max(1, Number(process.env.TEMP_CREDENTIAL_HOURS || 24)));
+admin.post('/contractors/:id/invite', SEC.limit('invite', 30, 15 * 60000, (r) => `u${r.user.id}`), wrap(async (req, res) => {
+  const c = getContractor(idParam(req.params.id));
+  const email = V.str(req.body.email || c.email, 120, { required: true, name: 'Email to send the login to', pattern: /^[^@\s]+@[^@\s]+\.[^@\s]+$/ }).toLowerCase();
+  let u = db.prepare('SELECT * FROM users WHERE contractor_id = ?').get(c.id);
+  const other = db.prepare('SELECT id, kind FROM users WHERE email = ?').get(email);
+  if (other && (!u || other.id !== u.id)) throw new V.VErr('That email already belongs to another FFD login.');
+  const tmpUser = `tmp-${crypto.randomBytes(5).toString('hex')}`; const tmpPw = readablePw();
+  const exp = Date.now() + TEMP_HOURS * 3600000;
+  if (u) {
+    db.prepare("UPDATE users SET email = ?, username = ?, password_hash = ?, kind = 'invited', must_change = 1, must_setup = 1, temp_expires_at = ?, temp_used_at = NULL WHERE id = ?")
+      .run(email, tmpUser, C.hashPassword(tmpPw), exp, u.id);
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id); db.prepare('DELETE FROM password_resets WHERE user_id = ?').run(u.id);
+    redactInvite(u.id, 'replaced by a newer invite');
+  } else {
+    const r = db.prepare("INSERT INTO users (email, username, password_hash, role, contractor_id, kind, must_change, must_setup, temp_expires_at) VALUES (?,?,?,'contractor',?,'invited',1,1,?)")
+      .run(email, tmpUser, C.hashPassword(tmpPw), c.id, exp);
+    u = { id: Number(r.lastInsertRowid) };
+  }
+  clearLockouts(email);
+  await MAIL.send(email, 'Your FFD sign-in (one-time temporary login)',
+    `Hi ${c.name.split(' ')[0]},\n\nAn FFD administrator set up your access. Sign in once with this temporary login, then choose your own username and password:\n\n`
+    + `  Username: ${tmpUser}\n  Temporary password: ${tmpPw}\n\nIt works ONE time and expires ${new Date(exp).toUTCString()}.\n`
+    + `Sign in at ${APP_URL} or in the FFD iPhone app.\n\nIf you weren't expecting this, ignore it and tell your FFD administrator.\n\n— FFD · Fit For Deployment`,
+    'invite', { sensitive: true, ref: `invite:${u.id}` });
+  audit(req, 'temp_credentials_issued', `${c.name} → ${email} (one-time, expires in ${TEMP_HOURS}h)`);
+  res.json({ ok: true, delivered: MAIL.provider() ? 'email' : 'outbox', to: email.replace(/^(.).*?(@.*)$/, '$1•••$2'), expires_at: exp });
+}));
 admin.get('/outbox', (req, res) => {
   if (!DEMO_MODE && process.env.MAIL_OUTBOX !== '1') return res.json({ enabled: false, messages: [] });
-  res.set('Cache-Control', 'no-store').json({ enabled: true, provider: MAIL.provider() || null, messages: db.prepare('SELECT * FROM outbox ORDER BY id DESC LIMIT 200').all() });
+  res.set('Cache-Control', 'no-store').json({ enabled: true, provider: MAIL.provider() || null, messages: db.prepare('SELECT * FROM outbox ORDER BY id DESC LIMIT 200').all().map(MAIL.view) });
 });
 admin.put('/contractors/:id/documents/:typeId', (req, res) => {
   const c = getContractor(idParam(req.params.id)); const typeId = idParam(req.params.typeId);

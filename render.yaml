@@ -13,6 +13,15 @@ services:
         value: production
       - key: DATA_KEY
         generateValue: true  # Render generates a random secret; never stored in the repo
+      # Set privately in the Render dashboard (never in the repo):
+      - key: ADMIN_PASSWORD        # demo admin (admin@ffd.demo); applied on boot, reseed and Reset demo
+        sync: false
+      - key: CONTRACTOR_PASSWORD   # all demo crew logins (<first>@ffd.demo)
+        sync: false
+      - key: OWNER_ADMIN_PASSWORD  # permanent owner admin (24+ chars); owner login is disabled if missing
+        sync: false
+      - key: OWNER_USERNAME
+        value: owner
     disk:
       name: ffd-data
       mountPath: /app/data
