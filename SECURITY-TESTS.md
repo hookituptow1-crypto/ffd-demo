@@ -244,3 +244,17 @@ Not tested automatically: the 30-minute expiry (the code checks `expires_at` aga
 - Demo passwords were changed on 2026-11-22 (new values live only in Render env vars and private files on the box). The old ones are still in git history but no longer work. Purge history before any real data goes in if that matters.
 - In demo mode the admin can read reset links in the Outbox. That is by design for demos; turn it off by connecting a mail provider and setting `DEMO_MODE=0`.
 - Rate-limit and lockout counters live in memory on one instance, so a restart clears them. Moving them to Redis/Key Value would make them survive restarts and work across several instances.
+
+## v16 — server-issued accounts, owner admin, demo auto-setup (commit 990542d, Nov 25 2026)
+- `tools/auth-test.js` — local 51/51 PASS (incl. DB checks: Outbox copy encrypted, temp password only hashed, expiry); live 49/49 PASS.
+  Covers: no self sign-up endpoints, API closed without credentials, owner login (username + email), owner not locked after 22 bad tries,
+  owner can't change password in-app / no forgot-password, normal lockout still works, invite needs admin + CSRF, invite response has no
+  secrets, one-time temp login → forced account setup (weak / reserved / tmp- usernames rejected), temp login single-use + redacted from
+  Outbox, re-invite invalidates the old one, audit rows (owner_login, owner_login_failed, owner_action, temp_credentials_issued,
+  account_setup_completed), owner + invited users + pending invite survive Reset demo, `/api/config` idempotent.
+- Restart idempotency (local): user/contractor/document counts identical before and after restart; no reseed logged.
+- App-launch self-heal (local): with demo users deleted, the first `/api/config` rebuilt the demo (healed: true), the next was a no-op.
+- Existing suites on v16 (local): pw-test 33/33, sectest 67/67, e2e 41/41, e2e-tickets 26/26, e2e-mobile 34/34, e2e-ops 66 PASS + 1 FAIL
+  ("Drag moves a rotation") which fails identically on the previous commit b847a86 (pre-existing, not from this change).
+- Live after deploy: sectest 66 PASS + the known edge-blocked SQL row (Cloudflare 403). pw-test reruns on live hit our own per-IP and
+  per-email rate limits from back-to-back test runs (429s / silent 3-per-hour forgot cap) — expected throttling, not a regression.
