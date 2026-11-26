@@ -115,6 +115,31 @@ async function latestInvite(admin, email) {
   ok('invited user still linked to their crew record after reseed', (await req(crew, 'GET', '/api/my/profile')).s === 200);
   ok('pending temp login survives Reset demo', !!(await latestInvite(own3, email2)));
   ok('demo admin still works after reset', (await login('admin@ffd.demo', CREDS.ADMIN_PASSWORD)).r.s === 200);
+
+  // --- logout always ends the session (no CSRF / Capacitor Origin must not leave the user signed in) ---
+  async function checkLogout(id, pw, label, extra = {}, csrfMode = 'none') {
+    const j = await login(id, pw);
+    if (j.r.s !== 200) { ok(`logout ${label}: signed in`, false, j.r.text); return; }
+    const cookie = j.c;
+    const csrf = csrfMode === 'none' ? undefined : csrfMode === 'wrong' ? 'forged' : j.csrf;
+    const r = await req({ c: cookie, csrf }, 'POST', '/api/logout', {}, extra);
+    const me = await req({ c: cookie }, 'GET', '/api/me');
+    ok(`logout ${label} returns 200 and ok`, r.s === 200 && r.json && r.json.ok === true, r.text);
+    ok(`logout ${label} ends the session (old cookie rejected)`, me.s === 401, me.text);
+  }
+  await checkLogout('tyler@ffd.demo', CREDS.CONTRACTOR_PASSWORD, 'contractor without CSRF');
+  await checkLogout('admin@ffd.demo', CREDS.ADMIN_PASSWORD, 'admin without CSRF');
+  await checkLogout(OWNER[0], OWNER[1], 'owner without CSRF');
+  await checkLogout('tyler@ffd.demo', CREDS.CONTRACTOR_PASSWORD, 'contractor with wrong CSRF', {}, 'wrong');
+  await checkLogout('tyler@ffd.demo', CREDS.CONTRACTOR_PASSWORD, 'contractor with capacitor:// Origin', { Origin: 'capacitor://localhost' }, 'ok');
+  await checkLogout('admin@ffd.demo', CREDS.ADMIN_PASSWORD, 'admin with capacitor:// Origin', { Origin: 'capacitor://localhost' }, 'ok');
+  await checkLogout(OWNER[0], OWNER[1], 'owner with capacitor:// Origin', { Origin: 'capacitor://localhost' }, 'ok');
+  // login page skips auto-redirect after sign-out
+  const loginJs = await (await fetch(BASE + '/js/login.js')).text();
+  const commonJs = await (await fetch(BASE + '/js/common.js')).text();
+  ok('client logout goes to /?signedout=1', commonJs.includes('/?signedout=1'));
+  ok('login.js skips auto-redirect when signedout=1', /signedout/.test(loginJs));
+
   // cleanup: delete the throwaway crew + their logins (they were re-created by the reseed with new ids)
   const all = (await req(own3, 'GET', '/api/admin/contractors')).json; const rows = all.contractors || all.rows || all;
   for (const c of rows.filter((x) => /^Trial Tester/.test(x.name))) await req(own3, 'DELETE', `/api/admin/contractors/${c.id}`);

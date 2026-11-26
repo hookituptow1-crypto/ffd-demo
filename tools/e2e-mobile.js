@@ -102,6 +102,22 @@ const ok = (name, cond, extra = '') => { results.push(`${cond ? 'PASS' : 'FAIL'}
     await snap(c, `70-phone-contractor-${who}.png`, true);
     await c.context().close();
   }
+  // Sign out must land on the login page and stay there (no auto-redirect bounce)
+  const cOut = await session('marcus@ffd.demo', CREDS.CONTRACTOR_PASSWORD, phone, '.verdict');
+  await cOut.click('#logout');
+  await cOut.waitForURL(/signedout=1|\/$/, { timeout: 15000 });
+  await cOut.waitForTimeout(1200);
+  const signedOut = await cOut.evaluate(() => ({ path: location.pathname + location.search, hasForm: !!document.querySelector('#f'), hasApp: !!document.querySelector('.verdict') }));
+  ok('Contractor Sign out stays on the login page', signedOut.hasForm && !signedOut.hasApp && /signedout=1/.test(signedOut.path), JSON.stringify(signedOut));
+  await snap(cOut, '71-phone-contractor-signed-out.png');
+  await cOut.context().close();
+  const aOut = await session('admin@ffd.demo', CREDS.ADMIN_PASSWORD, phone, '.mcard');
+  await aOut.click('[data-mtab="more"]'); await aOut.waitForSelector('#mOut'); await aOut.click('#mOut');
+  await aOut.waitForURL(/signedout=1|\/$/, { timeout: 15000 });
+  await aOut.waitForTimeout(1200);
+  const adminOut = await aOut.evaluate(() => ({ path: location.pathname + location.search, hasForm: !!document.querySelector('#f'), hasBoard: !!document.querySelector('.mcard') }));
+  ok('Admin Sign out stays on the login page', adminOut.hasForm && !adminOut.hasBoard && /signedout=1/.test(adminOut.path), JSON.stringify(adminOut));
+  await aOut.context().close();
   await b.close();
   console.log(results.join('\n')); console.log(errs.length ? 'JS errors:\n' + errs.join('\n') : 'No JS errors');
   console.log(`${results.filter((r) => r.startsWith('PASS')).length}/${results.length} passed`);

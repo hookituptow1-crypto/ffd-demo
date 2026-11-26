@@ -7,4 +7,4 @@ $('#f').addEventListener('submit', async (e) => {
 });
 // App launch: ask the server whether this is the demo environment (it also makes sure the demo data is in place).
 (async () => { try { const c = await (await fetch('/api/config', { cache: 'no-store' })).json(); if (c.demo) $('#demoTag').classList.remove('hidden'); } catch {} })();
-(async () => { try { const me = await (await fetch('/api/me')).json(); if (me.must_change) location.href = '/reset.html#change'; else if (me.role) location.href = me.role === 'admin' ? '/admin.html' : '/app.html'; } catch {} })();
+(async () => { if (new URLSearchParams(location.search).has('signedout')) return; try { const me = await (await fetch('/api/me')).json(); if (me.must_change) location.href = '/reset.html#change'; else if (me.role) location.href = me.role === 'admin' ? '/admin.html' : '/app.html'; } catch {} })();

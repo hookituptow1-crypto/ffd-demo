@@ -43,7 +43,7 @@ function fileToPayload(file, label) {
     const fr = new FileReader(); fr.onload = () => res({ label, mime: file.type, data: fr.result }); fr.onerror = () => rej(new Error('Could not read file')); fr.readAsDataURL(file);
   });
 }
-async function logout() { await api('POST', '/api/logout').catch(() => {}); location.href = '/'; }
+async function logout() { await api('POST', '/api/logout').catch(() => {}); location.href = '/?signedout=1'; }
 
 // ---- Intake / profile form (shared by contractor + admin) ----
 // ---- Airport type-ahead picker: <input data-airport> ; matches IATA code, city or airport name ----

@@ -84,7 +84,14 @@ function parseCookies(h = '') {
 }
 const COOKIE = (req) => (req.secure ? '__Host-ffd_sid' : 'ffd_sid'); // __Host- prefix = Secure, Path=/, no Domain (can't be planted by subdomains)
 const getTok = (req) => { const c = parseCookies(req.headers.cookie); return c['__Host-ffd_sid'] || c.ffd_sid; };
-const clearCookie = (req) => `${COOKIE(req)}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0${req.secure ? '; Secure' : ''}`;
+// Always clear both cookie names: req.secure can differ from the request that set the cookie (proxy / WKWebView).
+function clearCookies(res) {
+  const flags = 'HttpOnly; Path=/; SameSite=Strict; Max-Age=0';
+  res.append('Set-Cookie', `__Host-ffd_sid=; ${flags}; Secure`);
+  res.append('Set-Cookie', `ffd_sid=; ${flags}`);
+  res.append('Set-Cookie', `ffd_sid=; ${flags}; Secure`);
+  return res;
+}
 function auth(req, res, next) {
   req.clientIp = SEC.clientIp(req);
   const tok = getTok(req);
@@ -98,6 +105,9 @@ app.use(auth);
 // CSRF: every state-changing request needs the per-session token in a header (cookie is also SameSite=Strict)
 app.use('/api', (req, res, next) => {
   if (['GET', 'HEAD'].includes(req.method)) return next();
+  // Logout must always be allowed to end the session: a missing/stale CSRF token, or a Capacitor/WKWebView
+  // Origin like capacitor://localhost, must not leave the user signed in. Logout CSRF only signs the victim out.
+  if (req.path === '/logout') return next();
   // Defense in depth: reject cross-site writes by Origin, then require the per-session CSRF token
   const origin = req.get('origin');
   if (origin && origin !== `${req.protocol}://${req.get('host')}`) return res.status(403).json({ error: 'Cross-site request blocked' });
@@ -194,10 +204,11 @@ app.post('/api/login', loginLimit, wrap(async (req, res) => {
   audit({ clientIp: ip, user: { id: u.id } }, isOwner ? 'owner_login' : u.must_setup ? 'temp_login' : 'login', email);
   res.json({ role: u.role, csrf, must_change: !!u.must_change || !!u.must_setup, must_setup: !!u.must_setup });
 }));
-app.post('/api/logout', need(), (req, res) => {
-  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(C.sha256(getTok(req) || ''));
-  res.set('Set-Cookie', clearCookie(req));
-  audit(req, 'logout', req.user.email);
+app.post('/api/logout', (req, res) => {
+  const tok = getTok(req);
+  if (tok) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(C.sha256(tok));
+  clearCookies(res);
+  if (req.user) audit(req, 'logout', req.user.email);
   res.json({ ok: true });
 });
 // --------------- passwords: forgot / reset / change (+ admin overrides further down) ---------------
@@ -269,7 +280,7 @@ app.post('/api/password/reset', SEC.limit('pwr-ip', 10, 15 * 60000), (req, res) 
   db.prepare("UPDATE password_resets SET used_at = datetime('now') WHERE id = ?").run(r.id);
   afterPasswordChange(u, req, 'with an emailed reset link', false);
   audit({ clientIp: req.clientIp, user: { id: u.id } }, 'password_reset_completed', u.email);
-  res.set('Set-Cookie', clearCookie(req)).json({ ok: true });
+  clearCookies(res).json({ ok: true });
 });
 app.post('/api/password/change', need(), SEC.limit('pwc', 10, 15 * 60000), (req, res) => {
   const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
@@ -881,7 +892,7 @@ admin.get('/audit', (req, res) => res.json({ log: db.prepare('SELECT a.*, u.emai
 admin.post('/demo/reset', (req, res) => {
   if (!DEMO_MODE) return res.status(403).json({ error: 'Demo mode is off' });
   const who = req.user.email;
-  resetDemo(`manual reset by ${who}`); res.set('Set-Cookie', clearCookie(req)); res.json({ ok: true });
+  resetDemo(`manual reset by ${who}`); clearCookies(res); res.json({ ok: true });
 });
 // ---------------- Daily Deployment Report ----------------
 const addD = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);

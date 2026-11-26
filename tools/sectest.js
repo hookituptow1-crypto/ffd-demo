@@ -48,6 +48,12 @@ async function login(email, pw) { const j = jar(); const r = await req(j, 'POST'
   const tok = pre.c; await req(pre, 'POST', '/api/logout', {}, { Origin: ORIGIN });
   const after = await req({ c: tok }, 'GET', '/api/my/status');
   ok('Auth', 'Logout invalidates the session server-side (old cookie rejected)', after.s === 401);
+  const lo = await login('luis@ffd.demo', PW);
+  const noCsrf = await req({ c: lo.c }, 'POST', '/api/logout', {}, { Origin: ORIGIN });
+  ok('Auth', 'Logout without a CSRF token still ends the session', noCsrf.s === 200 && noCsrf.json && noCsrf.json.ok && (await req({ c: lo.c }, 'GET', '/api/me')).s === 401);
+  const cap = await login('ray@ffd.demo', PW);
+  const capOut = await req({ c: cap.c, csrf: cap.csrf }, 'POST', '/api/logout', {}, { Origin: 'capacitor://localhost' });
+  ok('Auth', 'Logout with capacitor:// Origin still ends the session', capOut.s === 200 && (await req({ c: cap.c }, 'GET', '/api/me')).s === 401);
   // ---------- access control
   ok('Setup', 'Admin + contractor logins work', cody.status === 200 && admin.status === 200);
   for (const p of ['/api/admin/contractors', '/api/admin/contractors/1', '/api/admin/tracking', '/api/admin/audit', '/api/admin/reports/daily', '/api/admin/schedule', '/api/admin/titles', '/api/admin/outbox', '/api/admin/tickets', '/api/admin/tickets/summary', '/api/admin/travel/settings', '/api/admin/crew', '/api/admin/contractors/1/account'])
